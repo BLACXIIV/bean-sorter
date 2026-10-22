@@ -376,7 +376,6 @@ def _belt_click(frame, pt):
     return None, ok(hex=hexv, id=cid, warnings=E._warnings())
 
 
-@app.route("/api/calibrate/click", methods=["POST", "OPTIONS"])
 def _patch_palette(frame, pt):
     """Direct colour grab at a tap point - no bean detection (dev helper)."""
     r = C.BELT_PATCH // 2
@@ -388,6 +387,7 @@ def _patch_palette(frame, pt):
             patch.shape[0] * patch.shape[1])
 
 
+@app.route("/api/calibrate/click", methods=["POST", "OPTIONS"])
 def api_click():
     if E.mode != "calibrate":
         return err("switch to calibrate mode first")
