@@ -248,6 +248,8 @@
           refreshGrades(); refreshBelt();
         }
       });
+    } else {
+      toast('Tap CALIBRATE first');
     }
   });
   function clearDots() {
