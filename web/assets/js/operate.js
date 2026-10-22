@@ -38,7 +38,8 @@
         if (!r.ok) {
           console.warn('post ' + path + ' HTTP ' + r.status + ' ' +
             Math.round(performance.now() - t0) + 'ms body=' + txt.slice(0, 120));
-          toast((label || path) + ' failed: HTTP ' + r.status);
+          toast(j && j.error ? j.error
+                             : (label || path) + ' failed: HTTP ' + r.status);
           return;
         }
         if (!j) {
