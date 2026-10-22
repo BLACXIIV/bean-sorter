@@ -143,11 +143,30 @@ class Engine:
                 if self.show_detected:
                     beans = vision.find_beans(frame, self.bg, self.belt) \
                         if (self.belt is not None or self.bg is not None) else []
-                    if self.belt is not None:
-                        mask = self.belt.bean_mask(frame)
-                        frame[mask == 0] = (frame[mask == 0] * 0.4).astype(np.uint8)
-                    for b in beans:
-                        cv2.drawContours(frame, [b.contour], -1, (255, 255, 255), 1)
+                    if self.selected_target == "belt":
+                        if self.belt is not None:
+                            mask = self.belt.bean_mask(frame)
+                            frame[mask == 0] = \
+                                (frame[mask == 0] * 0.4).astype(np.uint8)
+                        for b in beans:
+                            cv2.drawContours(frame, [b.contour], -1,
+                                             (255, 255, 255), 1)
+                    else:
+                        # grade target: tint each blob by its predicted grade
+                        for b in beans:
+                            grade = None
+                            if self.clf.model:
+                                pal = vision.extract_palette(
+                                    vision.bean_pixels(frame, b.contour,
+                                                       self.belt))
+                                if pal:
+                                    grade = self.clf.classify(pal)[0]
+                            col = vision.GRADE_BGR.get(grade, (160, 160, 160))
+                            cv2.drawContours(frame, [b.contour], -1, col, 2)
+                            ui.put_text(
+                                frame, "?" if grade is None else f"G{grade}",
+                                (int(b.centroid[0]) - 12, int(b.centroid[1]) + 5),
+                                col, 0.6, 2)
                 label = ("BELT" if self.selected_target == "belt"
                          else f"grade {self.selected_target}")
                 ui.draw_panel(frame, [f"CALIBRATE - {label}", self.message])
