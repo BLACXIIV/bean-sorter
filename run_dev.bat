@@ -7,8 +7,11 @@ set BEAN_DB=data\dev.db
 if not exist logs mkdir logs
 if not exist var\sessions mkdir var\sessions
 
-echo [dev] starting engine (webcam + simulated valve) ...
-for /f "usebackq tokens=*" %%P in (`powershell -NoProfile -Command "(Start-Process -PassThru -WindowStyle Hidden -FilePath '.\.venv\Scripts\python.exe' -ArgumentList 'engine.py','--camera','webcam','--valve','sim' -WorkingDirectory '%CD%' -RedirectStandardOutput 'logs\dev-engine.log' -RedirectStandardError 'logs\dev-engine.err').Id"`) do set ENG_PID=%%P
+rem optional arg: camera source, e.g. run_dev.bat webcam:1
+set CAM=webcam
+if not "%~1"=="" set CAM=%~1
+echo [dev] starting engine (camera %CAM% + simulated valve) ...
+for /f "usebackq tokens=*" %%P in (`powershell -NoProfile -Command "(Start-Process -PassThru -WindowStyle Hidden -FilePath '.\.venv\Scripts\python.exe' -ArgumentList 'engine.py','--camera','%CAM%','--valve','sim' -WorkingDirectory '%CD%' -RedirectStandardOutput 'logs\dev-engine.log' -RedirectStandardError 'logs\dev-engine.err').Id"`) do set ENG_PID=%%P
 
 echo [dev] starting PHP server ...
 for /f "usebackq tokens=*" %%P in (`powershell -NoProfile -Command "(Start-Process -PassThru -WindowStyle Hidden -FilePath 'php' -ArgumentList '-S','127.0.0.1:8080','-t','web' -WorkingDirectory '%CD%' -RedirectStandardOutput 'logs\dev-php.log' -RedirectStandardError 'logs\dev-php.err').Id"`) do set PHP_PID=%%P

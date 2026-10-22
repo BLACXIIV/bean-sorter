@@ -4,5 +4,4 @@ logs/
 var/
 __pycache__/
 *.pyc
-
 *.log

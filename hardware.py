@@ -83,13 +83,8 @@ class WebcamCamera:
     UI/flow testing only - never reuse them on the Pi camera."""
 
     def __init__(self, index=0, saved_settings=None):
-        if sys.platform == "win32":
-            self.cam = cv2.VideoCapture(index, cv2.CAP_DSHOW)
-        else:
-            self.cam = cv2.VideoCapture(index)
-        self.cam.set(cv2.CAP_PROP_FRAME_WIDTH, C.FRAME_SIZE[0])
-        self.cam.set(cv2.CAP_PROP_FRAME_HEIGHT, C.FRAME_SIZE[1])
-        self.cam.set(cv2.CAP_PROP_FPS, 30)
+        self.index = index
+        self._open(C.FRAME_SIZE)
         try:
             self.cam.set(cv2.CAP_PROP_AUTO_WB, 0)
             self.cam.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0)
@@ -99,7 +94,23 @@ class WebcamCamera:
             raise RuntimeError(f"webcam {index} did not open")
         for _ in range(5):                  # discard warm-up frames
             self.cam.read()
+        # some cams manage only ~1 fps at 720p (uncompressed USB); if a frame
+        # takes >300 ms, re-open at 640x480 - read() upscales to FRAME_SIZE
+        t = time.perf_counter()
+        self.cam.read()
+        if time.perf_counter() - t > 0.3:
+            self.cam.release()
+            self._open((640, 480))
         self.settings = {"webcam": True}
+
+    def _open(self, size):
+        if sys.platform == "win32":
+            self.cam = cv2.VideoCapture(self.index, cv2.CAP_DSHOW)
+        else:
+            self.cam = cv2.VideoCapture(self.index)
+        self.cam.set(cv2.CAP_PROP_FRAME_WIDTH, size[0])
+        self.cam.set(cv2.CAP_PROP_FRAME_HEIGHT, size[1])
+        self.cam.set(cv2.CAP_PROP_FPS, 30)
 
     def read(self):
         ok, frame = self.cam.read()

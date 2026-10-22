@@ -9,8 +9,9 @@ mkdir -p logs var/sessions
 PY=.venv/bin/python
 [ -x "$PY" ] || PY=python3
 
-echo "[dev] starting engine (webcam + simulated valve) ..."
-"$PY" engine.py --camera webcam --valve sim > logs/dev-engine.log 2>&1 &
+CAM="${1:-webcam}"          # optional arg: camera source, e.g. ./run_dev.sh webcam:1
+echo "[dev] starting engine (camera $CAM + simulated valve) ..."
+"$PY" engine.py --camera "$CAM" --valve sim > logs/dev-engine.log 2>&1 &
 ENG=$!
 echo "[dev] starting PHP server ..."
 php -S 127.0.0.1:8080 -t web > logs/dev-php.log 2>&1 &

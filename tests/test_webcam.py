@@ -61,8 +61,8 @@ class TestWebcamCamera(unittest.TestCase):
         c.set.assert_any_call(cv2.CAP_PROP_FRAME_WIDTH, C.FRAME_SIZE[0])
         c.set.assert_any_call(cv2.CAP_PROP_FRAME_HEIGHT, C.FRAME_SIZE[1])
         c.set.assert_any_call(cv2.CAP_PROP_FPS, 30)
-        # 5 warm-up reads discarded in __init__
-        self.assertEqual(c.read.call_count, 5)
+        # 5 warm-up reads + 1 speed-check read in __init__
+        self.assertEqual(c.read.call_count, 6)
 
     @mock.patch("cv2.VideoCapture")
     def test_closed_camera_raises(self, VC):
