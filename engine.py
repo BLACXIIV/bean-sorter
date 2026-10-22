@@ -377,6 +377,17 @@ def _belt_click(frame, pt):
 
 
 @app.route("/api/calibrate/click", methods=["POST", "OPTIONS"])
+def _patch_palette(frame, pt):
+    """Direct colour grab at a tap point - no bean detection (dev helper)."""
+    r = C.BELT_PATCH // 2
+    x, y = int(pt[0]), int(pt[1])
+    patch = frame[max(0, y - r):y + r + 1, max(0, x - r):x + r + 1]
+    if patch.size == 0:
+        return None, (x, y), 0
+    return (vision.extract_palette(patch.reshape(-1, 3)), (x, y),
+            patch.shape[0] * patch.shape[1])
+
+
 def api_click():
     if E.mode != "calibrate":
         return err("switch to calibrate mode first")
@@ -389,12 +400,23 @@ def api_click():
     if E.selected_target == "belt":
         error, resp = _belt_click(frame, pt)
         return err(error) if error else resp
-    if E.segmentation() == "none":
-        return err("no detection source - tap BELT colours or capture a background")
-    res = calibrate_click(E.db, frame, E.bg, pt, E.selected_target, E.belt)
-    if isinstance(res, str):
-        return err(res)
-    _, _, pal = res
+    pal = None
+    if E.segmentation() != "none":
+        res = calibrate_click(E.db, frame, E.bg, pt, E.selected_target, E.belt)
+        if not isinstance(res, str):          # bean blob found -> normal save
+            _, _, pal = res
+        elif not res.startswith("No bean detected"):
+            return err(res)
+    if pal is None:
+        # dev fallback: grab the colour patch under the tap even when no bean
+        # blob (or no detection source at all) is there
+        pal, (x, y), area = _patch_palette(frame, pt)
+        if not pal:
+            return err("No colour at that point")
+        E.db.add_sample(E.selected_target, x, y, area, pal)
+        E.message = f"Saved G{E.selected_target} (patch)"
+    else:
+        E.message = f"Saved G{E.selected_target}"
     sid = E.db.conn.execute("SELECT id FROM samples ORDER BY id DESC LIMIT 1") \
         .fetchone()[0]
     E.undo_stack.append(("sample", sid))
