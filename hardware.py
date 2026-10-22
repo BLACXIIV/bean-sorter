@@ -135,6 +135,8 @@ class Valve:
 
 class SimulatedValve:
     def pulse(self, delay=None, duration=None):
+        delay = C.VALVE_DELAY_S if delay is None else delay
+        duration = C.VALVE_PULSE_S if duration is None else duration
         print(f"[valve:simulated] BLOW (delay={delay}, duration={duration})")
 
     def close(self):
