@@ -1,8 +1,13 @@
 """All tunable settings in one place."""
+import os
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = BASE_DIR / "data" / "beans.db"
+# BEAN_DB points at a different database (dev runs must not mix webcam colours
+# with Pi-camera calibration - relative paths resolve under BASE_DIR).
+_db = os.environ.get("BEAN_DB")
+DB_PATH = (BASE_DIR / _db) if _db and not os.path.isabs(_db) \
+    else Path(_db) if _db else BASE_DIR / "data" / "beans.db"
 
 # ---- Camera ---------------------------------------------------------------
 FRAME_SIZE = (1280, 720)

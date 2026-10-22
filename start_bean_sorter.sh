@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # Bean Sorter launcher: engine + PHP + kiosk browser, with a lockfile so a
-# second click only re-opens the browser. --simulate is passed to the engine.
+# second click only re-opens the browser. Extra engine args pass through
+# (--simulate, --camera SRC, --valve real|sim); the production default is
+# --camera pi --valve real.
 set -u
 APP="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$APP"
 
 SIM=""
 for a in "$@"; do [ "$a" = "--simulate" ] && SIM="--simulate"; done
+ENGINE_ARGS=(--camera pi --valve real)
+[ -n "$SIM" ] && ENGINE_ARGS=(--simulate)
 
 mkdir -p logs var/sessions var/chromium
 LOCK="$APP/var/bean_sorter.lock"
@@ -40,7 +44,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-python3 engine.py $SIM >> logs/engine.log 2>&1 &
+python3 engine.py "${ENGINE_ARGS[@]}" >> logs/engine.log 2>&1 &
 ENGINE_PID=$!
 PHP_CLI_SERVER_WORKERS=4 php -S "$BIND:8080" -t web >> logs/php.log 2>&1 &
 PHP_PID=$!

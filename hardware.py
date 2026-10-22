@@ -1,4 +1,5 @@
 """Camera Module 3 (Picamera2) / PC webcam, and solenoid valve (gpiozero + lgpio on Pi 5)."""
+import sys
 import threading
 import time
 
@@ -76,23 +77,36 @@ class Camera:
 
 
 class WebcamCamera:
-    """cv2.VideoCapture fallback for developing on a PC (no picamera2).
+    """cv2.VideoCapture for developing on a PC (no picamera2).
 
-    No exposure/white-balance lock: settings stays None, so a Pi that later
-    opens the same DB re-locks its own camera instead of applying this."""
+    No exposure/white-balance lock: webcams drift, so webcam colours are for
+    UI/flow testing only - never reuse them on the Pi camera."""
 
-    def __init__(self, saved_settings=None):
-        self.cam = cv2.VideoCapture(C.WEBCAM_INDEX, cv2.CAP_DSHOW)
+    def __init__(self, index=0, saved_settings=None):
+        if sys.platform == "win32":
+            self.cam = cv2.VideoCapture(index, cv2.CAP_DSHOW)
+        else:
+            self.cam = cv2.VideoCapture(index)
         self.cam.set(cv2.CAP_PROP_FRAME_WIDTH, C.FRAME_SIZE[0])
         self.cam.set(cv2.CAP_PROP_FRAME_HEIGHT, C.FRAME_SIZE[1])
+        self.cam.set(cv2.CAP_PROP_FPS, 30)
+        try:
+            self.cam.set(cv2.CAP_PROP_AUTO_WB, 0)
+            self.cam.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0)
+        except Exception:
+            pass                            # many drivers ignore these
         if not self.cam.isOpened():
-            raise RuntimeError(f"webcam {C.WEBCAM_INDEX} did not open")
-        self.settings = None
+            raise RuntimeError(f"webcam {index} did not open")
+        for _ in range(5):                  # discard warm-up frames
+            self.cam.read()
+        self.settings = {"webcam": True}
 
     def read(self):
         ok, frame = self.cam.read()
         if not ok:
-            raise RuntimeError("webcam frame grab failed")
+            raise RuntimeError("Webcam read failed")
+        if (frame.shape[1], frame.shape[0]) != C.FRAME_SIZE:
+            frame = cv2.resize(frame, C.FRAME_SIZE, interpolation=cv2.INTER_AREA)
         return frame
 
     def average(self, n=10):
@@ -128,6 +142,10 @@ class SimulatedCamera:
         self._scene = "empty"
         self._beans = []
         self._seam_y = [self._h // 4, self._h // 2, 3 * self._h // 4]
+        self._base = None                         # cached plain belt frame
+        self._noise = [self._rng.integers(-8, 9, (self._h, self._w, 3),
+                                          dtype=np.int16) for _ in range(4)]
+        self._noise_i = 0
         self.settings = None
 
     def set_scene(self, scene):
@@ -135,9 +153,12 @@ class SimulatedCamera:
         self._beans = []
 
     def _belt(self):
-        frame = np.tile(np.array(self.BELT_BGR, np.uint8), (self._h, self._w, 1))
+        if self._base is None:
+            self._base = np.tile(np.array(self.BELT_BGR, np.uint8),
+                                 (self._h, self._w, 1))
         if self._scene == "moving":
             self._seam_y = [(y + self.SPEED) % self._h for y in self._seam_y]
+        frame = self._base.copy()
         for y, dark in zip(self._seam_y, self.SEAM_DARKER):
             bgr = tuple(max(0, c - dark) for c in self.BELT_BGR)
             cv2.rectangle(frame, (0, y - self.SEAM_T // 2),
@@ -145,7 +166,9 @@ class SimulatedCamera:
         return frame
 
     def read(self):
-        time.sleep(0.03)                          # ~30 fps, like a real camera
+        # pace like a camera (a real 30 fps cam blocks ~33 ms) but leave headroom
+        # so sim + processing stays above ~20 fps on a laptop
+        time.sleep(0.01)
         frame = self._belt()
         if self._scene == "static":
             for g, x in enumerate(self.GRID_X, start=1):
@@ -155,8 +178,9 @@ class SimulatedCamera:
             self._step()
             for x, y, g, r in self._beans:
                 self._draw_bean(frame, x, y, g, r)
-        noise = self._rng.normal(0, 3.0, frame.shape)
-        return np.clip(frame + noise, 0, 255).astype(np.uint8)
+        # fixed noise pool: sim palette never overflows +/-8 (16..228), no clip needed
+        self._noise_i = (self._noise_i + 1) % len(self._noise)
+        return (frame.astype(np.int16) + self._noise[self._noise_i]).astype(np.uint8)
 
     def _draw_bean(self, frame, x, y, grade, r):
         x, y = int(round(x)), int(round(y))
@@ -228,8 +252,14 @@ class SimulatedValve:
         pass
 
 
-def make_camera(saved_settings=None):
-    """Pi Camera when picamera2 exists, otherwise the PC webcam."""
+def make_camera(source="pi", saved_settings=None):
+    """source: "pi" (Picamera2, webcam fallback if unavailable), "webcam" or
+    "webcam:N" (PC camera index N), "sim" (SimulatedCamera)."""
+    if source == "sim":
+        return SimulatedCamera()
+    if source == "webcam" or source.startswith("webcam:"):
+        idx = int(source.split(":", 1)[1]) if ":" in source else C.WEBCAM_INDEX
+        return WebcamCamera(idx)
     try:
         return Camera(saved_settings)
     except Exception as e:

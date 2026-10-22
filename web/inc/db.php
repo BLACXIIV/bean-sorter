@@ -2,7 +2,12 @@
 declare(strict_types=1);
 
 define('ROOT', dirname(__DIR__, 2));          // project root (parent of web/)
-define('DB_PATH', ROOT . '/data/beans.db');
+// BEAN_DB selects a different database for dev runs (webcam colours are not
+// valid for the Pi camera - never mix them). Relative paths sit under ROOT.
+$env_db = getenv('BEAN_DB') ?: '';
+define('DB_PATH', $env_db === '' ? ROOT . '/data/beans.db'
+    : ($env_db[0] === '/' || preg_match('/^[A-Za-z]:[\\\\\/]/', $env_db)
+        ? $env_db : ROOT . '/' . $env_db));
 define('ENGINE', 'http://127.0.0.1:5000');
 
 date_default_timezone_set('Asia/Manila');   // display tz; DB stays UTC

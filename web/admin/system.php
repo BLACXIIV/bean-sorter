@@ -47,7 +47,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-$eng = engine_get('/api/status');
 $dbsize = is_file(DB_PATH) ? round(filesize(DB_PATH) / 1024, 1) . ' KB' : 'missing';
 
 page_head('System', 'admin');
@@ -55,17 +54,7 @@ echo '<div class="wrap"><h2>System</h2>';
 if ($msg) echo '<p class="warn">' . e($msg) . '</p>';
 if ($err) echo '<p class="err">' . e($err) . '</p>';
 
-echo '<div class="grid2"><div class="card"><h2>Engine</h2>';
-if ($eng === null) {
-    echo '<p class="err">Engine not running</p>';
-} else {
-    echo '<table>',
-         '<tr><td>Mode</td><td>' . e($eng['mode']) . '</td></tr>',
-         '<tr><td>Armed</td><td>' . ($eng['armed'] ? '<b class="err">ARMED</b>' : 'no') . '</td></tr>',
-         '<tr><td>FPS</td><td>' . e($eng['fps']) . '</td></tr>',
-         '<tr><td>Simulated</td><td>' . ($eng['sim'] ? 'yes' : 'no') . '</td></tr>',
-         '<tr><td>Session</td><td>' . e($eng['session_id'] ?? '-') . '</td></tr></table>';
-}
+echo '<div class="grid2"><div class="card"><h2>Engine</h2><div id="engine-sys"><p class="muted">checking...</p></div>';
 echo '</div><div class="card"><h2>Database</h2><p>Size: ' . e($dbsize) . '</p>',
      '<a class="btn" href="?backup=1">Download DB backup</a></div></div>';
 

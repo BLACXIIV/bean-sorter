@@ -25,7 +25,6 @@ $runs->execute([$u0, $u1]);
 $runsToday = (int)$runs->fetchColumn();
 
 $last = $db->query('SELECT * FROM run_sessions ORDER BY id DESC LIMIT 1')->fetch();
-$eng = engine_get('/api/status');
 
 $max = max(1, max($tot));
 $bars = '';
@@ -49,15 +48,7 @@ echo '</div><div class="grid2">';
 
 echo '<div class="card"><h2>Today per grade</h2><svg class="chart" viewBox="0 0 480 210">' . $bars . '</svg></div>';
 
-echo '<div><div class="card"><h2>Engine</h2>';
-if ($eng === null) {
-    echo '<p class="err">Engine not running</p>';
-} else {
-    echo '<p>mode <b>' . e($eng['mode']) . '</b> &middot; ' .
-         ($eng['armed'] ? '<b class="err">ARMED</b>' : 'disarmed') . ' &middot; ' .
-         e($eng['fps']) . ' fps' . ($eng['sim'] ? ' &middot; <b class="warn">SIM</b>' : '') . '</p>';
-    echo '<p class="muted">' . e($eng['message']) . '</p>';
-}
+echo '<div><div class="card"><h2>Engine</h2><div id="engine-card"><p class="muted">checking...</p></div>';
 echo '</div><div class="card"><h2>Last run</h2>';
 if (!$last) {
     echo '<p class="muted">No runs yet.</p>';

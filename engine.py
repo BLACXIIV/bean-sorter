@@ -9,10 +9,16 @@ Modes: idle | calibrate | run. The valve is OFF on start, on signals and on
 exit, and the engine starts DISARMED until a run is started.
 """
 import argparse
+import logging
 import signal
+import sys
 import threading
 import time
 from collections import deque
+
+logging.basicConfig(level=logging.DEBUG,
+                    format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("engine")
 
 import cv2
 import numpy as np
@@ -22,7 +28,7 @@ import config as C
 import ui
 import vision
 from db import DB
-from hardware import SimulatedCamera, SimulatedValve, make_camera, make_valve
+from hardware import SimulatedValve, make_camera, make_valve
 from sorter import Line, Sorter, calibrate_click
 
 FRAME_W, FRAME_H = C.FRAME_SIZE
@@ -38,16 +44,26 @@ TUNABLES = ("DEFECT_BIAS", "UNKNOWN_DE", "VALVE_DELAY_S", "VALVE_PULSE_S",
 
 
 class Engine:
-    def __init__(self, simulate):
+    def __init__(self, camera_source="pi", valve_source="real"):
         self.db = DB()
-        self.sim = simulate
-        if simulate:
-            self.cam = SimulatedCamera()
-            self.valve = SimulatedValve()
-        else:
-            self.cam = make_camera(saved_settings=self.db.get_json("camera"))
+        self.camera_source = camera_source
+        self.valve_source = valve_source
+        self.sim = camera_source == "sim"
+        self.cam = make_camera(camera_source,
+                               saved_settings=self.db.get_json("camera"))
+        if self.cam.settings:
             self.db.set_json("camera", self.cam.settings)   # same as calibrate.py
+        if valve_source == "real":
+            try:
+                import gpiozero  # noqa: F401
+            except ImportError:
+                self.cam.close()
+                raise SystemExit(
+                    "[valve] gpiozero not installed - no real valve possible; "
+                    "rerun with --valve sim for testing")
             self.valve = make_valve()
+        else:
+            self.valve = SimulatedValve()
         self.apply_tunables()
 
         self.mode = "idle"          # idle | calibrate | run
@@ -69,6 +85,10 @@ class Engine:
         self.cond = threading.Condition()
         self.lock = threading.Lock()
         self._stop = False
+        self._t0 = time.perf_counter()
+        # stage timings: ms totals + frame counts, reset each log window
+        self.tim = {"cam": 0.0, "jpeg": 0.0, "find": 0.0, "cls": 0.0, "draw": 0.0}
+        self.tim_n = 0
 
     # ---------------------------------------------------------------- helpers
     def _load_line(self):
@@ -110,11 +130,15 @@ class Engine:
     # ------------------------------------------------------------- main loop
     def loop(self):
         t_prev, last_enc = time.perf_counter(), 0.0
+        last_log = t_prev
         while not self._stop:
+            t_read0 = time.perf_counter()
             frame = self.cam.read()
             now = time.perf_counter()
+            self.tim["cam"] += (now - t_read0) * 1000
+            self.tim_n += 1
             if self.mode == "run" and self.sorter is not None:
-                self.sorter.process(frame, self.armed)
+                self.sorter.process(frame, self.armed, self.tim)
             elif self.mode == "calibrate":
                 if self.show_detected:
                     beans = vision.find_beans(frame, self.bg, self.belt) \
@@ -136,14 +160,29 @@ class Engine:
 
             # encode only while a client is watching, max 15 fps
             if self.stream_clients and now - last_enc >= 1.0 / STREAM_FPS:
+                t_enc0 = time.perf_counter()
                 small = cv2.resize(frame, (STREAM_W, STREAM_H), interpolation=cv2.INTER_AREA)
                 ok, jpg = cv2.imencode(".jpg", small,
                                        [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+                self.tim["jpeg"] += (time.perf_counter() - t_enc0) * 1000
                 if ok:
                     with self.cond:
                         self.jpeg = jpg.tobytes()
                         self.cond.notify_all()
                     last_enc = now
+
+            # per-stage timing log every 5 s (DEBUG)
+            if now - last_log >= 5.0:
+                n = max(1, self.tim_n)
+                log.debug("ms/frame  cam=%.1f find=%.1f cls=%.1f draw=%.1f "
+                          "jpeg=%.1f  -> %.1f fps (%d frames)",
+                          self.tim["cam"] / n, self.tim["find"] / n,
+                          self.tim["cls"] / n, self.tim["draw"] / n,
+                          self.tim["jpeg"] / n, self.fps, self.tim_n)
+                for k in self.tim:
+                    self.tim[k] = 0.0
+                self.tim_n = 0
+                last_log = now
 
     # ----------------------------------------------------------------- modes
     def set_mode(self, mode, batch_name=None):
@@ -185,7 +224,11 @@ class Engine:
             line = {"p1": [self.line.p1[0] / FRAME_W, self.line.p1[1] / FRAME_H],
                     "p2": [self.line.p2[0] / FRAME_W, self.line.p2[1] / FRAME_H]}
         return {"mode": self.mode, "armed": self.armed, "fps": round(self.fps, 1),
-                "sim": self.sim, "has_background": self.bg is not None,
+                "sim": self.sim or self.valve_source == "sim",
+                "camera_source": ("webcam" if self.camera_source.startswith("webcam")
+                                  else self.camera_source),
+                "valve": self.valve_source,
+                "has_background": self.bg is not None,
                 "line": line, "selected_target": self.selected_target,
                 "selected_grade": (self.selected_target
                                    if isinstance(self.selected_target, int) else None),
@@ -246,6 +289,13 @@ def stream():
         finally:
             E.stream_clients -= 1
     return Response(gen(), mimetype="multipart/x-mixed-replace; boundary=frame")
+
+
+@app.route("/api/health")
+def api_health():
+    # lock-free liveness probe
+    return jsonify(ok=True, uptime_s=round(time.perf_counter() - E._t0, 1),
+                   fps=round(E.fps, 1), loop_ms=round(1000 / max(E.fps, 0.1), 1))
 
 
 @app.route("/api/status")
@@ -424,13 +474,13 @@ def api_reload():
 
 
 def list_cameras():
-    """Probe webcam indices 0-5 (PC fallback only - the Pi camera isn't listed)."""
-    for i in range(6):
-        cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+    """Probe webcam indices 0-4 (the Pi camera isn't a VideoCapture device)."""
+    for i in range(5):
+        cap = cv2.VideoCapture(i, cv2.CAP_DSHOW if sys.platform == "win32" else 0)
         if cap.isOpened():
             ok, fr = cap.read()
-            name = cap.getBackendName()
-            print(f"  index {i}: {'frame OK %dx%d' % (fr.shape[1], fr.shape[0]) if ok else 'opens but no frame'} ({name})")
+            res = f"{fr.shape[1]}x{fr.shape[0]}" if ok else "opens but no frame"
+            print(f"  index {i}: {res} ({cap.getBackendName()})")
         else:
             print(f"  index {i}: not present")
         cap.release()
@@ -440,21 +490,24 @@ def main():
     global E
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--simulate", action="store_true",
-                    help="SimulatedCamera + SimulatedValve, no hardware needed")
+                    help="shortcut for --camera sim --valve sim")
+    ap.add_argument("--camera", default="pi", metavar="SRC",
+                    help="pi | webcam | webcam:N (device index) | sim")
+    ap.add_argument("--valve", choices=["real", "sim"], default="real")
     ap.add_argument("--port", type=int, default=5000)
-    ap.add_argument("--camera", type=int, default=None, metavar="N",
-                    help="webcam index on a PC (see --list-cameras); Pi ignores this")
     ap.add_argument("--list-cameras", action="store_true",
-                    help="probe webcam indices 0-5 and exit")
+                    help="probe webcam indices 0-4 and exit")
     args = ap.parse_args()
 
     if args.list_cameras:
         list_cameras()
         return
-    if args.camera is not None:
-        C.WEBCAM_INDEX = args.camera
+    cam_src = args.camera
+    valve_src = args.valve
+    if args.simulate:
+        cam_src, valve_src = "sim", "sim"
 
-    E = Engine(args.simulate)
+    E = Engine(cam_src, valve_src)
     threading.Thread(target=E.loop, daemon=True).start()
 
     def _sig(signum, frame):
@@ -462,7 +515,8 @@ def main():
     signal.signal(signal.SIGTERM, _sig)
 
     try:
-        app.run(host="127.0.0.1", port=args.port, threaded=True)
+        app.run(host="127.0.0.1", port=args.port, threaded=True,
+                debug=False, use_reloader=False)
     except KeyboardInterrupt:
         pass
     finally:

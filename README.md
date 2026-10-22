@@ -32,8 +32,12 @@ Push code edits from the PC (`git push`), then `git pull` on the Pi. No internet
 
 ## 2b. Windows PC (dev / testing, no GPIO)
 
-Falls back to your webcam and a simulated valve automatically (`--dry-run` also forces the simulated
-valve). Webcam auto-exposure makes colours drift – do real calibration on the Pi.
+The full web UI + engine runs on a laptop - see **Laptop dev run** below
+(`run_dev.bat`: webcam + simulated valve + separate dev database).
+The legacy OpenCV tools fall back to your webcam and a simulated valve automatically
+(`--dry-run` also forces the simulated valve). Webcam auto-exposure makes colours
+drift – do real calibration on the Pi.
+To pick a specific USB webcam: `engine.py --camera webcam:1` or `--list-cameras`.
 
 ```powershell
 py -m venv .venv
@@ -47,10 +51,24 @@ Wrong camera opening? Change `WEBCAM_INDEX` in `config.py`.
 
 `install.sh` on the Pi installs everything once, then the **Bean Sorter** desktop icon runs
 `start_bean_sorter.sh`: Flask engine on `127.0.0.1:5000` (owns camera + valve) + PHP on
-`127.0.0.1:8080` + Chromium kiosk at 1024x600. `./start_bean_sorter.sh --simulate` runs the
-whole thing without hardware. Admin password defaults to `admin123` (forced change on first
-login). Closing the kiosk stops everything with the valve OFF.
+`127.0.0.1:8080` + Chromium kiosk at 1024x600. Admin password defaults to `admin123`
+(forced change on first login). Closing the kiosk stops everything with the valve OFF.
 The OpenCV windows (`main.py calibrate`/`run`) still work when the engine is not running.
+
+Engine arguments: `--camera pi|webcam|webcam:N|sim` (default `pi`), `--valve real|sim`
+(default `real`), `--simulate` = `--camera sim --valve sim`, `--list-cameras` probes
+webcam indices 0-4, `--port N`.
+
+### Laptop dev run (no Pi, no GPIO)
+
+`run_dev.bat` (Windows) / `run_dev.sh` (Linux/macOS): sets `BEAN_DB=data/dev.db`
+(**separate database** – webcam colours are not valid for the Pi camera, never mix
+them), starts `engine.py --camera webcam --valve sim` and `php -S 127.0.0.1:8080 -t web`,
+opens the browser, and stops both when the window closes. Deps:
+`pip install -r requirements-dev.txt` (flask, opencv, numpy) + PHP CLI with sqlite3.
+
+Webcam auto white balance / exposure can drift – webcam colours are for **UI/flow
+testing only**; always recalibrate on the Pi.
 
 ## 3. Use
 

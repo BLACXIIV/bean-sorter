@@ -52,9 +52,12 @@ class BeltModel:
                            interpolation=cv2.INTER_AREA)
         small = cv2.GaussianBlur(small, (3, 3), 0)
         lab = cv2.cvtColor(small.astype(np.float32) / 255.0, cv2.COLOR_BGR2Lab)
-        diff = lab[:, :, None, :] - self.colors[None, None, :, :]   # (h,w,M,3)
-        diff[..., 0] *= lw
-        min_d2 = (diff * diff).sum(axis=3).min(axis=2)              # (h,w)
+        # scalar broadcasting per channel: far less memory traffic than (h,w,M,3)
+        L, a, b = lab[..., 0], lab[..., 1], lab[..., 2]
+        min_d2 = None
+        for c0, c1, c2 in self.colors:
+            d2 = (lw * (L - c0)) ** 2 + (a - c1) ** 2 + (b - c2) ** 2
+            min_d2 = d2 if min_d2 is None else np.minimum(min_d2, d2)
         mask = np.where(min_d2 >= tol * tol, 255, 0).astype(np.uint8)
         return cv2.resize(mask, (frame_bgr.shape[1], frame_bgr.shape[0]),
                           interpolation=cv2.INTER_NEAREST)

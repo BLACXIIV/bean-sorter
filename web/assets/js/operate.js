@@ -12,19 +12,49 @@
   var linePts = [];
 
   $('cam').src = ENGINE + '/stream.mjpg';
+  addEventListener('pagehide', function () { $('cam').src = ''; });   // free the stream
   var seg = document.createElement('span');     // detection-source chip in top bar
   seg.className = 'chip';
   seg.id = 'seg-chip';
   $('engine-chip').parentNode.insertBefore(seg, $('engine-chip').nextSibling);
 
-  function post(path, obj, cb) {
-    fetch(ENGINE + path, {
+  function timedFetch(url, opts, ms) {          // AbortController timeout
+    var ac = new AbortController();
+    var t = setTimeout(function () { ac.abort(); }, ms);
+    return fetch(url, Object.assign({ signal: ac.signal }, opts || {}))
+      .finally(function () { clearTimeout(t); });
+  }
+
+  function post(path, obj, cb, label) {
+    var t0 = performance.now();
+    timedFetch(ENGINE + path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(obj || {})
-    }).then(function (r) { return r.json(); })
-      .then(function (j) { if (cb) cb(j); if (!j.ok && j.error) toast(j.error); })
-      .catch(function () { toast('engine unreachable'); });
+    }, 6000).then(function (r) {
+      return r.text().then(function (txt) {
+        var j = null;
+        try { j = JSON.parse(txt); } catch (e) {}
+        if (!r.ok) {
+          console.warn('post ' + path + ' HTTP ' + r.status + ' ' +
+            Math.round(performance.now() - t0) + 'ms body=' + txt.slice(0, 120));
+          toast((label || path) + ' failed: HTTP ' + r.status);
+          return;
+        }
+        if (!j) {
+          console.warn('post ' + path + ' bad JSON ' +
+            Math.round(performance.now() - t0) + 'ms');
+          toast((label || path) + ' failed: bad reply');
+          return;
+        }
+        if (cb) cb(j);
+        if (!j.ok && j.error) toast(j.error);
+      });
+    }).catch(function (e) {
+      console.warn('post ' + path + ' ' + e.name + ' ' + e.message + ' ' +
+        Math.round(performance.now() - t0) + 'ms');
+      toast((label || path) + ' failed: ' + e.message);
+    });
   }
 
   /* ---------------- toast + confirm modal ---------------- */
@@ -262,16 +292,26 @@
     $('btn-start').disabled = !!reason;
   }
 
-  /* ---------------- status poll ---------------- */
+  /* ---------------- status poll (chained, timeout, 3-strike banner) -------- */
+  var fails = 0;
   function poll() {
-    fetch(ENGINE + '/api/status').then(function (r) { return r.json(); })
+    var t0 = performance.now();
+    timedFetch(ENGINE + '/api/status', null, 3500)
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
       .then(function (j) {
+        fails = 0;
         st = j;
         $('engine-down').classList.add('hidden');
         $('engine-chip').className = 'chip ok';
         $('engine-chip').innerHTML = j.mode + ' &middot; ' +
           (j.armed ? '<b style="color:var(--g4)">ARMED</b>' : 'DISARMED') +
-          ' &middot; ' + j.fps + 'fps' + (j.sim ? ' &middot; <span class="sim">SIM</span>' : '');
+          ' &middot; ' + j.fps + 'fps &middot; ' +
+          '<span class="' + (j.camera_source !== 'pi' || j.valve !== 'real' ? 'sim' : '') + '">' +
+          'CAM: ' + (j.camera_source || '?').toUpperCase() +
+          ' &middot; VALVE: ' + (j.valve || '?').toUpperCase() + '</span>';
         $('seg-chip').textContent = 'Detection: ' +
           (j.segmentation === 'belt_color' ? 'Conveyor color'
             : j.segmentation === 'background' ? 'Background' : 'None');
@@ -294,14 +334,20 @@
         $('show-detected').checked = !!j.show_detected;
         updateStart();
       })
-      .catch(function () {
+      .catch(function (e) {
+        console.warn('poll /api/status ' + e.name + ' ' + e.message + ' ' +
+          Math.round(performance.now() - t0) + 'ms');
         st = null;
-        $('engine-down').classList.remove('hidden');
-        $('engine-chip').className = 'chip bad';
-        $('engine-chip').textContent = 'engine offline';
-      });
+        fails++;
+        if (fails >= 3) {                     // banner only on 3 strikes
+          $('engine-down').classList.remove('hidden');
+          $('engine-chip').className = 'chip bad';
+          $('engine-chip').textContent = 'engine offline';
+        }
+      })
+      .finally(function () { setTimeout(poll, 500); });   // never overlap
   }
-  setInterval(poll, 500); poll();
+  poll();
   setInterval(function () {
     if (st && st.mode === 'calibrate') { refreshGrades(); refreshBelt(); }
   }, 3000);

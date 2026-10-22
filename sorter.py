@@ -108,16 +108,22 @@ class Sorter:
         """New sorting line, keeps counters (same as the old 'l' key)."""
         self.line, self.tracker = line, Tracker()
 
-    def process(self, frame, armed=True):
+    def process(self, frame, armed=True, tim=None):
         self.idx += 1
+        t0 = time.perf_counter()
         matched = self.tracker.update(vision.find_beans(frame, self.bg, self.belt), self.idx)
+        if tim is not None:
+            tim["find"] += (time.perf_counter() - t0) * 1000
         now = time.perf_counter()
 
         for t, b in matched:
             if sum(t.votes.values()) < C.MAX_VOTES:
+                tc = time.perf_counter()
                 pal = vision.extract_palette(vision.bean_pixels(frame, b.contour, self.belt))
                 if pal:
                     t.votes[self.clf.classify(pal)[0]] += 1
+                if tim is not None:
+                    tim["cls"] += (time.perf_counter() - tc) * 1000
             grade = t.decide()
 
             s = self.line.side(t.pos)
@@ -134,10 +140,13 @@ class Sorter:
                 self.db.log_event(grade, fire, self.session_id)
             t.prev_side = s
 
+            td = time.perf_counter()
             col = vision.GRADE_BGR.get(grade, (160, 160, 160))
             cv2.drawContours(frame, [b.contour], -1, col, 2)
             ui.put_text(frame, "?" if grade is None else f"G{grade}",
                         (int(b.centroid[0]) - 12, int(b.centroid[1]) + 5), col, 0.6, 2)
+            if tim is not None:
+                tim["draw"] += (time.perf_counter() - td) * 1000
 
         line_col = (0, 0, 255) if now < self.flash_until else (0, 255, 255)
         cv2.line(frame, self.line.p1, self.line.p2, line_col, 3)

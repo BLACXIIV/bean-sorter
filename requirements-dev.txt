@@ -1,0 +1,4 @@
+# Laptop dev run (run_dev.bat / run_dev.sh) - engine + nothing Pi-specific
+flask>=3,<4
+opencv-python>=4.10,<5
+numpy>=2.1,<3
