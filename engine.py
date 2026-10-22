@@ -416,13 +416,36 @@ def api_reload():
     return ok(tunables={k: getattr(C, k) for k in TUNABLES})
 
 
+def list_cameras():
+    """Probe webcam indices 0-5 (PC fallback only - the Pi camera isn't listed)."""
+    for i in range(6):
+        cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+        if cap.isOpened():
+            ok, fr = cap.read()
+            name = cap.getBackendName()
+            print(f"  index {i}: {'frame OK %dx%d' % (fr.shape[1], fr.shape[0]) if ok else 'opens but no frame'} ({name})")
+        else:
+            print(f"  index {i}: not present")
+        cap.release()
+
+
 def main():
     global E
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--simulate", action="store_true",
                     help="SimulatedCamera + SimulatedValve, no hardware needed")
     ap.add_argument("--port", type=int, default=5000)
+    ap.add_argument("--camera", type=int, default=None, metavar="N",
+                    help="webcam index on a PC (see --list-cameras); Pi ignores this")
+    ap.add_argument("--list-cameras", action="store_true",
+                    help="probe webcam indices 0-5 and exit")
     args = ap.parse_args()
+
+    if args.list_cameras:
+        list_cameras()
+        return
+    if args.camera is not None:
+        C.WEBCAM_INDEX = args.camera
 
     E = Engine(args.simulate)
     threading.Thread(target=E.loop, daemon=True).start()
