@@ -43,6 +43,15 @@ py -m venv .venv
 ```
 Wrong camera opening? Change `WEBCAM_INDEX` in `config.py`.
 
+## 2c. Web UI (touch screen, offline)
+
+`install.sh` on the Pi installs everything once, then the **Bean Sorter** desktop icon runs
+`start_bean_sorter.sh`: Flask engine on `127.0.0.1:5000` (owns camera + valve) + PHP on
+`127.0.0.1:8080` + Chromium kiosk at 1024x600. `./start_bean_sorter.sh --simulate` runs the
+whole thing without hardware. Admin password defaults to `admin123` (forced change on first
+login). Closing the kiosk stops everything with the valve OFF.
+The OpenCV windows (`main.py calibrate`/`run`) still work when the engine is not running.
+
 ## 3. Use
 
 ```bash
