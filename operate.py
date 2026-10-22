@@ -1,7 +1,5 @@
 """Operation: draw the sorting line, then grade beans live and blow grade 4 at the line."""
-import math
 import time
-from collections import Counter
 
 import cv2
 
@@ -9,83 +7,9 @@ import config as C
 import ui
 import vision
 from hardware import make_camera, make_valve
+from sorter import Line, Sorter
 
 WIN = "Bean Sorter"
-
-
-# ------------------------------------------------------------------ geometry
-class Line:
-    def __init__(self, p1, p2):
-        self.p1, self.p2 = p1, p2
-        self.dx, self.dy = p2[0] - p1[0], p2[1] - p1[1]
-        self.len2 = float(self.dx ** 2 + self.dy ** 2) or 1.0
-
-    def side(self, p):
-        return self.dx * (p[1] - self.p1[1]) - self.dy * (p[0] - self.p1[0])
-
-    def along(self, p):
-        return ((p[0] - self.p1[0]) * self.dx + (p[1] - self.p1[1]) * self.dy) / self.len2
-
-
-# ------------------------------------------------------------------ tracking
-class Track:
-    _next = 1
-
-    def __init__(self, pos, idx):
-        self.id = Track._next
-        Track._next += 1
-        self.pos, self.vel, self.last_seen = pos, (0.0, 0.0), idx
-        self.votes = Counter()
-        self.prev_side = None
-        self.done = False
-
-    def predict(self):
-        return (self.pos[0] + self.vel[0], self.pos[1] + self.vel[1])
-
-    def update(self, pos, idx):
-        dt = max(1, idx - self.last_seen)
-        nv = ((pos[0] - self.pos[0]) / dt, (pos[1] - self.pos[1]) / dt)
-        self.vel = (0.5 * self.vel[0] + 0.5 * nv[0], 0.5 * self.vel[1] + 0.5 * nv[1])
-        self.pos, self.last_seen = pos, idx
-
-    def decide(self):
-        total = sum(self.votes.values())
-        if total == 0:
-            return None
-        if self.votes[4] >= 1 and self.votes[4] / total >= C.DEFECT_VOTE_RATIO:
-            return 4
-        good = {g: n for g, n in self.votes.items() if g != 4}
-        return max(good, key=good.get) if good else 4
-
-
-class Tracker:
-    def __init__(self):
-        self.tracks = []
-
-    def update(self, beans, idx):
-        cand = []
-        for ti, t in enumerate(self.tracks):
-            p = t.predict()
-            for bi, b in enumerate(beans):
-                d = math.hypot(b.centroid[0] - p[0], b.centroid[1] - p[1])
-                if d <= C.TRACK_MAX_DIST:
-                    cand.append((d, ti, bi))
-        cand.sort()
-        used_t, used_b, matched = set(), set(), []
-        for d, ti, bi in cand:
-            if ti in used_t or bi in used_b:
-                continue
-            used_t.add(ti)
-            used_b.add(bi)
-            self.tracks[ti].update(beans[bi].centroid, idx)
-            matched.append((self.tracks[ti], beans[bi]))
-        for bi, b in enumerate(beans):
-            if bi not in used_b:
-                t = Track(b.centroid, idx)
-                self.tracks.append(t)
-                matched.append((t, b))
-        self.tracks = [t for t in self.tracks if idx - t.last_seen <= C.TRACK_MAX_MISSED]
-        return matched
 
 
 # ----------------------------------------------------------------- line setup
@@ -149,48 +73,18 @@ def operate(db, dry_run=False):
 
 
 def _loop(cam, db, valve, bg, clf, line):
-    tracker, stats, blown = Tracker(), Counter(), 0
-    idx, fps, t_prev = 0, 0.0, time.perf_counter()
-    armed, flash_until = True, 0.0
+    sorter = Sorter(db, bg, clf, line, valve)
+    fps, t_prev = 0.0, time.perf_counter()
+    armed = True
 
     while True:
         frame = cam.read()
-        idx += 1
-        matched = tracker.update(vision.find_beans(frame, bg), idx)
         now = time.perf_counter()
-
-        for t, b in matched:
-            # classify this bean for its first few frames, then trust the votes
-            if sum(t.votes.values()) < C.MAX_VOTES:
-                pal = vision.extract_palette(vision.bean_pixels(frame, b.contour))
-                if pal:
-                    t.votes[clf.classify(pal)[0]] += 1
-            grade = t.decide()
-
-            s = line.side(t.pos)
-            crossed = (t.prev_side is not None and (t.prev_side >= 0) != (s >= 0)
-                       and -C.LINE_MARGIN <= line.along(t.pos) <= 1 + C.LINE_MARGIN)
-            if crossed and not t.done and grade is not None:
-                t.done = True
-                stats[f"g{grade}"] += 1
-                fire = (grade == 4 and armed)
-                if fire:
-                    valve.pulse()
-                    blown += 1
-                    flash_until = now + 0.25
-                db.log_event(grade, fire)
-            t.prev_side = s
-
-            col = vision.GRADE_BGR.get(grade, (160, 160, 160))
-            cv2.drawContours(frame, [b.contour], -1, col, 2)
-            ui.put_text(frame, "?" if grade is None else f"G{grade}",
-                        (int(b.centroid[0]) - 12, int(b.centroid[1]) + 5), col, 0.6, 2)
-
-        line_col = (0, 0, 255) if now < flash_until else (0, 255, 255)
-        cv2.line(frame, line.p1, line.p2, line_col, 3)
+        sorter.process(frame, armed)
 
         fps = 0.9 * fps + 0.1 / max(1e-6, now - t_prev)
         t_prev = now
+        stats, blown = sorter.stats, sorter.blown
         ui.draw_panel(frame, [
             ("ARMED - valve active" if armed else "DISARMED - valve OFF (counting only)")
             + f"   {fps:4.1f} fps",
@@ -210,4 +104,4 @@ def _loop(cam, db, valve, bg, clf, line):
             new = setup_line(cam, db)
             if new is None:
                 break
-            line, tracker = new, Tracker()
+            sorter.set_line(new)

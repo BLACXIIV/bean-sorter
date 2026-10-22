@@ -7,6 +7,7 @@ import config as C
 import ui
 import vision
 from hardware import make_camera
+from sorter import calibrate_click
 
 WIN = "Calibration"
 HELP = [
@@ -44,18 +45,13 @@ def calibrate(db):
                 if bg is None:
                     msg = "Capture the background first (B, empty tray)"
                 else:
-                    bean = vision.bean_at(frame, bg, pt)
-                    if bean is None:
-                        msg = "No bean detected there - click the bean centre"
+                    res = calibrate_click(db, frame, bg, pt, grade)
+                    if isinstance(res, str):
+                        msg = res
                     else:
-                        pal = vision.extract_palette(vision.bean_pixels(frame, bean.contour))
-                        if not pal:
-                            msg = "Bean too small / not enough pixels"
-                        else:
-                            db.add_sample(grade, int(bean.centroid[0]), int(bean.centroid[1]),
-                                          bean.area, pal)
-                            marks.append((bean.contour, grade, bean.centroid))
-                            msg = f"Saved G{grade}: " + "  ".join(p.hex for p in pal)
+                        cnt, cen, pal = res
+                        marks.append((cnt, grade, cen))
+                        msg = f"Saved G{grade}: " + "  ".join(p.hex for p in pal)
 
             view = frame.copy()
             if show_all and bg is not None:

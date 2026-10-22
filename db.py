@@ -1,6 +1,9 @@
-"""SQLite storage: colour collections per grade, camera lock, background, line, log."""
+"""SQLite storage: colour collections per grade, camera lock, background, line, log.
+
+Thread-safe: each thread gets its own connection to the same WAL file."""
 import json
 import sqlite3
+import threading
 
 import cv2
 import numpy as np
@@ -33,18 +36,55 @@ CREATE TABLE IF NOT EXISTS sort_log(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT DEFAULT CURRENT_TIMESTAMP,
     grade INTEGER,
-    blown INTEGER
+    blown INTEGER,
+    session_id INTEGER
 );
+CREATE TABLE IF NOT EXISTS run_sessions(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_name TEXT,
+    started_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    ended_at TEXT,
+    g1 INTEGER DEFAULT 0,
+    g2 INTEGER DEFAULT 0,
+    g3 INTEGER DEFAULT 0,
+    g4 INTEGER DEFAULT 0,
+    blown INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_sortlog_ts ON sort_log(ts);
 """
+
+SCHEMA_VERSION = 2
 
 
 class DB:
     def __init__(self, path=DB_PATH):
         path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(path))
-        self.conn.execute("PRAGMA foreign_keys=ON")
-        self.conn.execute("PRAGMA journal_mode=WAL")
+        self._path = str(path)
+        self._local = threading.local()
         self.conn.executescript(SCHEMA)
+        self._migrate()
+
+    @property
+    def conn(self):
+        c = getattr(self._local, "conn", None)
+        if c is None:
+            c = sqlite3.connect(self._path)
+            c.execute("PRAGMA busy_timeout=5000")
+            c.execute("PRAGMA foreign_keys=ON")
+            c.execute("PRAGMA journal_mode=WAL")
+            self._local.conn = c
+        return c
+
+    def _migrate(self):
+        v = self.conn.execute("PRAGMA user_version").fetchone()[0]
+        if v < 2:
+            cols = [r[1] for r in self.conn.execute("PRAGMA table_info(sort_log)")]
+            if "session_id" not in cols:
+                self.conn.execute("ALTER TABLE sort_log ADD COLUMN session_id INTEGER")
+            self.conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sortlog_session ON sort_log(session_id)")
+        self.conn.commit()
 
     # ---- generic settings (camera lock, sorting line, ...) -----------------
     def set_json(self, key, obj):
@@ -124,7 +164,25 @@ class DB:
                 model[g] = np.array(pts, np.float32)
         return model
 
+    # ---- run sessions --------------------------------------------------------
+    def start_session(self, batch_name=None):
+        cur = self.conn.execute("INSERT INTO run_sessions(batch_name) VALUES(?)", (batch_name,))
+        self.conn.commit()
+        return cur.lastrowid
+
+    def end_session(self, session_id):
+        self.conn.execute(
+            "UPDATE run_sessions SET ended_at=CURRENT_TIMESTAMP WHERE id=?", (session_id,))
+        self.conn.commit()
+
     # ---- operation log -------------------------------------------------------
-    def log_event(self, grade, blown):
-        self.conn.execute("INSERT INTO sort_log(grade, blown) VALUES(?,?)", (grade, int(blown)))
+    def log_event(self, grade, blown, session_id=None):
+        self.conn.execute(
+            "INSERT INTO sort_log(grade, blown, session_id) VALUES(?,?,?)",
+            (grade, int(blown), session_id))
+        if session_id is not None:
+            g = int(grade) if grade in (1, 2, 3, 4) else 4
+            self.conn.execute(
+                f"UPDATE run_sessions SET g{g}=g{g}+1, blown=blown+? WHERE id=?",
+                (int(blown), session_id))
         self.conn.commit()

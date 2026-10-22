@@ -102,6 +102,77 @@ class WebcamCamera:
         self.cam.release()
 
 
+class SimulatedCamera:
+    """Synthetic frames for testing without any hardware.
+
+    set_scene("empty")   plain light-gray tray + noise  (for background capture)
+    set_scene("static")  4x4 grid: column 1..4 = grade 1..4 at GRID_X x GRID_Y
+    set_scene("moving")  random beans (~75 % grades 1-3, ~25 % grade 4) falling
+                         down the frame at ~25 px/frame, crossing the middle.
+    """
+
+    GRADE_BGR = {1: (40, 90, 150), 2: (45, 80, 125), 3: (50, 70, 100), 4: (25, 30, 40)}
+    PATCH_BGR = (30, 120, 190)                    # yellow-brown defect patch on G4
+    GRID_X = (160, 480, 800, 1120)                # column per grade
+    GRID_Y = (90, 270, 450, 630)
+    BEAN_R = 40
+    SPEED = 25
+    MAX_BEANS = 8
+
+    def __init__(self, saved_settings=None):
+        self._w, self._h = C.FRAME_SIZE
+        self._rng = np.random.default_rng(7)
+        self._scene = "empty"
+        self._beans = []
+        self.settings = None
+
+    def set_scene(self, scene):
+        self._scene = scene
+        self._beans = []
+
+    def read(self):
+        time.sleep(0.03)                          # ~30 fps, like a real camera
+        frame = np.full((self._h, self._w, 3), 190, np.uint8)
+        if self._scene == "static":
+            for g, x in enumerate(self.GRID_X, start=1):
+                for y in self.GRID_Y:
+                    self._draw_bean(frame, x, y, g, self.BEAN_R)
+        elif self._scene == "moving":
+            self._step()
+            for x, y, g, r in self._beans:
+                self._draw_bean(frame, x, y, g, r)
+        noise = self._rng.normal(0, 3.0, frame.shape)
+        return np.clip(frame + noise, 0, 255).astype(np.uint8)
+
+    def _draw_bean(self, frame, x, y, grade, r):
+        x, y = int(round(x)), int(round(y))
+        cv2.circle(frame, (x, y), r, self.GRADE_BGR[grade], -1, cv2.LINE_AA)
+        if grade == 4:
+            cv2.circle(frame, (x + r // 3, y - r // 3), r // 3, self.PATCH_BGR, -1, cv2.LINE_AA)
+
+    def _step(self):
+        for b in self._beans:
+            b[1] += self.SPEED
+        self._beans = [b for b in self._beans if b[1] < self._h + 60]
+        tries = 0
+        while len(self._beans) < self.MAX_BEANS and tries < 50:
+            tries += 1
+            x = float(self._rng.integers(80, self._w - 80))
+            y = float(-self.BEAN_R - self._rng.integers(0, 400))
+            grade = 4 if self._rng.random() < 0.25 else int(self._rng.integers(1, 4))
+            r = int(self._rng.integers(30, 46))
+            if any(abs(b[0] - x) < 2 * self.BEAN_R + 20 and abs(b[1] - y) < 2 * self.BEAN_R + 20
+                   for b in self._beans):
+                continue
+            self._beans.append([x, y, grade, r])
+
+    def average(self, n=10):
+        return _average(self.read, n)
+
+    def close(self):
+        pass
+
+
 class Valve:
     def __init__(self):
         from gpiozero import OutputDevice

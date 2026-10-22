@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Bean Sorter
+Comment=Coffee bean sorting machine
+Exec=__APP__/start_bean_sorter.sh
+Icon=__APP__/web/assets/icon.png
+Terminal=false
+Categories=Utility;
