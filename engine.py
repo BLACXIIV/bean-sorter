@@ -213,6 +213,13 @@ def body():
     return request.get_json(silent=True) or {}
 
 
+@app.before_request
+def preflight():
+    # CORS preflight: answer 200 immediately; after_request adds the headers.
+    if request.method == "OPTIONS":
+        return "", 200
+
+
 @app.after_request
 def cors(resp):
     origin = request.headers.get("Origin")
