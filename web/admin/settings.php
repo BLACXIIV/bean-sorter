@@ -13,6 +13,8 @@ $TUNABLES = [
     'MIN_BEAN_AREA'      => [50, 5000, 10, 400],
     'MAX_BEAN_AREA'      => [5000, 100000, 500, 30000],
     'DEFECT_VOTE_RATIO'  => [0.1, 0.9, 0.05, 0.3],
+    'BELT_TOLERANCE'     => [5, 50, 0.5, 18.0],
+    'BELT_L_WEIGHT'      => [0.1, 1.0, 0.05, 0.5],
 ];
 
 $msg = ''; $err = '';

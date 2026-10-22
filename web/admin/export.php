@@ -88,6 +88,21 @@ function write_colors($sheet, array $rows): void {
     sheet_style($sheet, count($head));
 }
 
+function write_belt($sheet, array $rows): void {
+    $head = ['Hex', 'L', 'a', 'b', 'Captured at'];
+    $sheet->fromArray($head, null, 'A1');
+    $r = 2;
+    foreach ($rows as $x) {
+        $sheet->fromArray([
+            $x['hex'], round($x['L'], 2), round($x['a'], 2), round($x['b'], 2),
+            local_dt($x['created_at']),
+        ], null, 'A' . $r);
+        hex_cell($sheet, 'A' . $r, $x['hex']);
+        $r++;
+    }
+    sheet_style($sheet, count($head));
+}
+
 function write_log($sheet, array $rows): void {
     $head = ['Time', 'Run #', 'Grade', 'Blown'];
     $sheet->fromArray($head, null, 'A1');
@@ -103,6 +118,10 @@ $colorRows = $db->query(
     'SELECT gc.sample_id, gc.grade, gc.hex, gc.L, gc.a, gc.b, gc.weight, s.created_at
      FROM grade_colors gc JOIN samples s ON s.id = gc.sample_id
      ORDER BY gc.grade, gc.sample_id, gc.id'
+)->fetchAll();
+
+$beltRows = $db->query(
+    'SELECT hex, L, a, b, created_at FROM belt_colors ORDER BY id'
 )->fetchAll();
 
 $logRows = function () use ($db, $f) {
@@ -129,6 +148,7 @@ $add = function (string $title, callable $fn) use ($book) {
 
 if ($view === 'grades') {
     $add('Grade Colors', fn($s) => write_colors($s, $colorRows));
+    $add('Conveyor Colors', fn($s) => write_belt($s, $beltRows));
 } elseif ($view === 'current') {
     if ($tab === 'runs')  $add('Runs', fn($s) => write_runs($s, run_rows($db, $f['from'], $f['to'], $f['run'])));
     if ($tab === 'daily') $add('Daily', fn($s) => write_daily($s, run_rows($db, $f['from'], $f['to'], $f['run'])));
@@ -137,6 +157,7 @@ if ($view === 'grades') {
     $add('Runs', fn($s) => write_runs($s, run_rows($db, null, null, null)));
     $add('Daily', fn($s) => write_daily($s, run_rows($db, null, null, null)));
     $add('Grade Colors', fn($s) => write_colors($s, $colorRows));
+    $add('Conveyor Colors', fn($s) => write_belt($s, $beltRows));
     $add('Sort Log', fn($s) => write_log($s, $logRows()));
 }
 

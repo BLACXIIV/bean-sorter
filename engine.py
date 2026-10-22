@@ -12,8 +12,10 @@ import argparse
 import signal
 import threading
 import time
+from collections import deque
 
 import cv2
+import numpy as np
 from flask import Flask, Response, jsonify, request
 
 import config as C
@@ -31,7 +33,8 @@ ALLOWED_ORIGINS = {"http://127.0.0.1:8080", "http://localhost:8080"}
 
 # settings keys the web UI may tune (validated server-side by PHP)
 TUNABLES = ("DEFECT_BIAS", "UNKNOWN_DE", "VALVE_DELAY_S", "VALVE_PULSE_S",
-            "DIFF_THRESHOLD", "MIN_BEAN_AREA", "MAX_BEAN_AREA", "DEFECT_VOTE_RATIO")
+            "DIFF_THRESHOLD", "MIN_BEAN_AREA", "MAX_BEAN_AREA", "DEFECT_VOTE_RATIO",
+            "BELT_TOLERANCE", "BELT_L_WEIGHT")
 
 
 class Engine:
@@ -49,14 +52,16 @@ class Engine:
 
         self.mode = "idle"          # idle | calibrate | run
         self.armed = False
-        self.selected_grade = 1
+        self.selected_target = 1    # "belt" | 1 | 2 | 3 | 4
         self.show_detected = False
         self.message = "Engine started"
         self.session_id = None
         self.sorter = None
         self.bg = self.db.load_background()
+        self.belt = self._load_belt()
         self.clf = vision.Classifier(self.db.load_model())
         self.line = self._load_line()
+        self.undo_stack = deque(maxlen=20)   # ("sample"|"belt", row id)
 
         self.fps = 0.0
         self.jpeg = None
@@ -71,6 +76,20 @@ class Engine:
         if pts and len(pts) == 2:
             return Line(tuple(pts[0]), tuple(pts[1]))
         return None
+
+    def _load_belt(self):
+        colors = self.db.load_belt_colors()
+        return vision.BeltModel(colors) if colors is not None else None
+
+    def segmentation(self):
+        if self.belt is not None:
+            return "belt_color"
+        return "background" if self.bg is not None else "none"
+
+    def _warnings(self):
+        return vision.belt_warnings(self.db.load_belt_colors(),
+                                    self.clf.model, C.BELT_TOLERANCE,
+                                    C.BELT_L_WEIGHT)
 
     def apply_tunables(self):
         saved = self.db.get_json("tunables") or {}
@@ -97,10 +116,17 @@ class Engine:
             if self.mode == "run" and self.sorter is not None:
                 self.sorter.process(frame, self.armed)
             elif self.mode == "calibrate":
-                if self.show_detected and self.bg is not None:
-                    for b in vision.find_beans(frame, self.bg):
+                if self.show_detected:
+                    beans = vision.find_beans(frame, self.bg, self.belt) \
+                        if (self.belt is not None or self.bg is not None) else []
+                    if self.belt is not None:
+                        mask = self.belt.bean_mask(frame)
+                        frame[mask == 0] = (frame[mask == 0] * 0.4).astype(np.uint8)
+                    for b in beans:
                         cv2.drawContours(frame, [b.contour], -1, (255, 255, 255), 1)
-                ui.draw_panel(frame, [f"CALIBRATE - grade {self.selected_grade}", self.message])
+                label = ("BELT" if self.selected_target == "belt"
+                         else f"grade {self.selected_target}")
+                ui.draw_panel(frame, [f"CALIBRATE - {label}", self.message])
             else:
                 if self.line is not None:
                     cv2.line(frame, self.line.p1, self.line.p2, (0, 255, 255), 2)
@@ -129,8 +155,9 @@ class Engine:
                     self.db.end_session(self.session_id)
                 self.session_id, self.sorter, self.armed = None, None, False
             if mode == "run":
-                if self.bg is None:
-                    return "No background saved - capture it in CALIBRATE first"
+                if self.segmentation() == "none":
+                    return ("No detection source - tap the conveyor colour "
+                            "in CALIBRATE or capture a background")
                 self.clf = vision.Classifier(self.db.load_model())
                 if not self.clf.ready():
                     return "Calibration incomplete: need grade 4 plus one of grades 1-3"
@@ -138,7 +165,7 @@ class Engine:
                     return "No sorting line - draw it first"
                 self.session_id = self.db.start_session(batch_name)
                 self.sorter = Sorter(self.db, self.bg, self.clf, self.line,
-                                     self.valve, self.session_id)
+                                     self.valve, self.session_id, belt=self.belt)
                 self.armed = True
                 if self.sim:
                     self.cam.set_scene("moving")
@@ -159,7 +186,12 @@ class Engine:
                     "p2": [self.line.p2[0] / FRAME_W, self.line.p2[1] / FRAME_H]}
         return {"mode": self.mode, "armed": self.armed, "fps": round(self.fps, 1),
                 "sim": self.sim, "has_background": self.bg is not None,
-                "line": line, "selected_grade": self.selected_grade,
+                "line": line, "selected_target": self.selected_target,
+                "selected_grade": (self.selected_target
+                                   if isinstance(self.selected_target, int) else None),
+                "segmentation": self.segmentation(),
+                "belt_count": len(self.belt.colors) if self.belt is not None else 0,
+                "warnings": self._warnings(),
                 "show_detected": self.show_detected,
                 "session_id": self.session_id, "counts": counts,
                 "message": self.message}
@@ -240,51 +272,107 @@ def api_bg():
     return ok()
 
 
+def _norm_target(b):
+    """Request body -> 'belt' | 1..4, honouring both target= and legacy grade=."""
+    t = b.get("target", b.get("grade"))
+    if t == "belt" or t in (1, 2, 3, 4):
+        return t
+    if isinstance(t, str) and t.isdigit() and int(t) in (1, 2, 3, 4):
+        return int(t)
+    return None
+
+
 @app.route("/api/calibrate/select", methods=["POST", "OPTIONS"])
 def api_select():
-    g = body().get("grade")
-    if g not in (1, 2, 3, 4):
-        return err("grade must be 1-4")
-    E.selected_grade = g
-    return ok(grade=g)
+    t = _norm_target(body())
+    if t is None:
+        return err('target must be "belt" or 1-4')
+    E.selected_target = t
+    return ok(target=t)
+
+
+def _belt_click(frame, pt):
+    """BELT_PATCH square around pt -> median Lab colour, uniformity checked.
+    Returns (error_string | None, response)."""
+    p = C.BELT_PATCH // 2
+    x0, x1 = int(max(0, pt[0] - p)), int(min(FRAME_W, pt[0] + p + 1))
+    y0, y1 = int(max(0, pt[1] - p)), int(min(FRAME_H, pt[1] + p + 1))
+    patch = frame[y0:y1, x0:x1]
+    lab = vision.bgr_to_lab(patch.reshape(-1, 3))
+    med = np.median(lab, axis=0)
+    std = lab.std(axis=0)
+    if std[1] > 10 or std[2] > 10 or std[0] > 25:
+        return "Patch not uniform - tap plain belt, not a bean or seam", None
+    if E.belt is not None:
+        diff = E.belt.colors - med
+        diff[:, 0] *= C.BELT_L_WEIGHT
+        if float(np.sqrt((diff * diff).sum(axis=1)).min()) < 2.0:
+            return None, ok(note="already covered")
+    if E.db.conn.execute("SELECT COUNT(*) FROM belt_colors").fetchone()[0] \
+            >= C.BELT_MAX_COLORS:
+        return f"max {C.BELT_MAX_COLORS} conveyor colours - clear one first", None
+    hexv = vision.lab_to_hex(med)
+    cid = E.db.add_belt_color(med, hexv)
+    E.belt = E._load_belt()
+    E.undo_stack.append(("belt", cid))
+    E.message = "Belt colour saved"
+    return None, ok(hex=hexv, id=cid, warnings=E._warnings())
 
 
 @app.route("/api/calibrate/click", methods=["POST", "OPTIONS"])
 def api_click():
     if E.mode != "calibrate":
         return err("switch to calibrate mode first")
-    if E.bg is None:
-        return err("capture the background first")
     b = body()
     try:
         pt = (float(b["nx"]) * FRAME_W, float(b["ny"]) * FRAME_H)
     except (KeyError, TypeError, ValueError):
         return err("need nx, ny in 0..1")
     frame = E.cam.read()
-    res = calibrate_click(E.db, frame, E.bg, pt, E.selected_grade)
+    if E.selected_target == "belt":
+        error, resp = _belt_click(frame, pt)
+        return err(error) if error else resp
+    if E.segmentation() == "none":
+        return err("no detection source - tap BELT colours or capture a background")
+    res = calibrate_click(E.db, frame, E.bg, pt, E.selected_target, E.belt)
     if isinstance(res, str):
         return err(res)
     _, _, pal = res
+    sid = E.db.conn.execute("SELECT id FROM samples ORDER BY id DESC LIMIT 1") \
+        .fetchone()[0]
+    E.undo_stack.append(("sample", sid))
     E.clf = vision.Classifier(E.db.load_model())
-    E.message = f"Saved G{E.selected_grade}"
-    return ok(grade=E.selected_grade, hex=[p.hex for p in pal])
+    E.message = f"Saved G{E.selected_target}"
+    return ok(grade=E.selected_target, hex=[p.hex for p in pal],
+              warnings=E._warnings())
 
 
 @app.route("/api/calibrate/undo", methods=["POST", "OPTIONS"])
 def api_undo():
-    g = E.db.delete_last_sample()
-    E.clf = vision.Classifier(E.db.load_model())
-    return ok(grade=g) if g else err("nothing to undo")
+    while E.undo_stack:
+        kind, rid = E.undo_stack.pop()
+        if kind == "belt":
+            E.db.delete_belt_color(rid)
+            E.belt = E._load_belt()
+            return ok(kind="belt", warnings=E._warnings())
+        E.db.delete_sample(rid)
+        E.clf = vision.Classifier(E.db.load_model())
+        return ok(kind="sample", warnings=E._warnings())
+    return err("nothing to undo")
 
 
 @app.route("/api/calibrate/clear", methods=["POST", "OPTIONS"])
 def api_clear():
-    g = body().get("grade")
-    if g not in (1, 2, 3, 4):
-        return err("grade must be 1-4")
-    E.db.clear_grade(g)
+    t = _norm_target(body())
+    if t == "belt":
+        E.db.clear_belt_colors()
+        E.belt = E._load_belt()
+        return ok(warnings=E._warnings())
+    if t is None:
+        return err('target must be "belt" or 1-4')
+    E.db.clear_grade(t)
     E.clf = vision.Classifier(E.db.load_model())
-    return ok()
+    return ok(warnings=E._warnings())
 
 
 @app.route("/api/calibrate/show-detected", methods=["POST", "OPTIONS"])
@@ -323,6 +411,8 @@ def api_valve():
 @app.route("/api/settings/reload", methods=["POST", "OPTIONS"])
 def api_reload():
     E.apply_tunables()
+    E.belt = E._load_belt()          # PHP admin may have changed belt colours too
+    E.clf = vision.Classifier(E.db.load_model())
     return ok(tunables={k: getattr(C, k) for k in TUNABLES})
 
 

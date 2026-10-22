@@ -34,13 +34,16 @@ main{height:calc(100vh - 44px)}
 
 /* ---------- operate layout: exactly 1024x600 ---------- */
 .op-grid{display:grid;grid-template-columns:648px 1fr;height:100%}
-.op-left{padding:2px 6px}
-.cam-wrap{position:relative;width:640px;height:360px;background:#000;
+.op-left{padding:2px 6px;display:flex;flex-direction:column}
+.cam-wrap{position:relative;width:640px;height:360px;flex:none;background:#000;
   border:1px solid var(--line)}
 .cam-wrap img{width:640px;height:360px;display:block;user-select:none;-webkit-user-drag:none}
 .cam-dot{position:absolute;width:14px;height:14px;border-radius:50%;
   background:#00FFFF;outline:2px solid #000;transform:translate(-50%,-50%);pointer-events:none}
 .controls{margin-top:4px;height:178px;overflow:hidden}
+.warnstrip{position:absolute;left:0;right:0;bottom:38px;z-index:2;
+  padding:4px 10px;color:var(--g3);background:rgba(21,21,21,.92);
+  border-top:1px solid var(--line);font-size:13px;max-height:64px;overflow:hidden}
 .op-right{border-left:1px solid var(--line);padding:8px;overflow-y:auto}
 
 .seg{display:flex;gap:4px;margin-bottom:6px}
@@ -56,12 +59,17 @@ button.primary{background:var(--g1);border-color:var(--g1);color:#000;font-weigh
 button.danger{background:transparent;border-color:var(--g4);color:var(--g4)}
 button.big{min-height:56px;font-size:18px;font-weight:700}
 .gbtn{flex:1;font-size:17px;font-weight:700;border-width:2px}
-.gbtn[data-g="1"]{border-color:var(--g1);color:var(--g1)}
-.gbtn[data-g="2"]{border-color:var(--g2);color:var(--g2)}
-.gbtn[data-g="3"]{border-color:var(--g3);color:var(--g3)}
-.gbtn[data-g="4"]{border-color:var(--g4);color:var(--g4)}
+.gbtn[data-t="1"]{border-color:var(--g1);color:var(--g1)}
+.gbtn[data-t="2"]{border-color:var(--g2);color:var(--g2)}
+.gbtn[data-t="3"]{border-color:var(--g3);color:var(--g3)}
+.gbtn[data-t="4"]{border-color:var(--g4);color:var(--g4)}
+.gbtn.belt{border-color:var(--line);color:var(--muted);padding:0 6px}
 .gbtn.on{background:#2a2a2a;box-shadow:inset 0 0 0 2px currentColor}
-.hint{color:var(--muted);font-size:14px;margin:2px 0 6px}
+#belt-strip{display:flex;gap:2px;justify-content:center;margin-top:3px;min-height:8px}
+#belt-strip i{width:16px;height:8px;border-radius:2px;border:1px solid #000}
+button.secondary{min-height:40px;font-size:14px;color:var(--muted)}
+.hint{color:var(--muted);font-size:14px;margin:2px 0 6px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .reason{color:var(--g3);font-size:14px}
 
 input[type=text],input[type=password],input[type=date],input[type=number],select{

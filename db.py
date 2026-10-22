@@ -51,9 +51,15 @@ CREATE TABLE IF NOT EXISTS run_sessions(
     blown INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_sortlog_ts ON sort_log(ts);
+CREATE TABLE IF NOT EXISTS belt_colors(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    hex TEXT NOT NULL,
+    L REAL, a REAL, b REAL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
 """
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class DB:
@@ -81,6 +87,7 @@ class DB:
             cols = [r[1] for r in self.conn.execute("PRAGMA table_info(sort_log)")]
             if "session_id" not in cols:
                 self.conn.execute("ALTER TABLE sort_log ADD COLUMN session_id INTEGER")
+        if v < SCHEMA_VERSION:
             self.conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sortlog_session ON sort_log(session_id)")
@@ -133,12 +140,17 @@ class DB:
         self.conn.commit()
         return r[1]
 
+    def delete_sample(self, sample_id):
+        self.conn.execute("DELETE FROM samples WHERE id=?", (int(sample_id),))
+        self.conn.commit()
+
     def clear_grade(self, grade):
         self.conn.execute("DELETE FROM samples WHERE grade=?", (grade,))
         self.conn.commit()
 
     def clear_all(self):
-        for t in ("samples", "grade_colors", "settings", "background", "sort_log"):
+        for t in ("samples", "grade_colors", "settings", "background", "sort_log",
+                  "belt_colors"):
             self.conn.execute(f"DELETE FROM {t}")
         self.conn.commit()
 
@@ -163,6 +175,40 @@ class DB:
             if pts:
                 model[g] = np.array(pts, np.float32)
         return model
+
+    # ---- conveyor belt colours -------------------------------------------------
+    def add_belt_color(self, lab, hex):
+        cur = self.conn.execute(
+            "INSERT INTO belt_colors(hex,L,a,b) VALUES(?,?,?,?)",
+            (hex, float(lab[0]), float(lab[1]), float(lab[2])))
+        self.conn.commit()
+        return cur.lastrowid
+
+    def list_belt_colors(self):
+        return self.conn.execute(
+            "SELECT id, hex, L, a, b, created_at FROM belt_colors ORDER BY id").fetchall()
+
+    def delete_belt_color(self, color_id):
+        self.conn.execute("DELETE FROM belt_colors WHERE id=?", (int(color_id),))
+        self.conn.commit()
+
+    def delete_last_belt_color(self):
+        r = self.conn.execute(
+            "SELECT id FROM belt_colors ORDER BY id DESC LIMIT 1").fetchone()
+        if not r:
+            return None
+        self.conn.execute("DELETE FROM belt_colors WHERE id=?", (r[0],))
+        self.conn.commit()
+        return r[0]
+
+    def clear_belt_colors(self):
+        self.conn.execute("DELETE FROM belt_colors")
+        self.conn.commit()
+
+    def load_belt_colors(self):
+        """float32 (M, 3) Lab array of saved conveyor colours, or None."""
+        rows = self.conn.execute("SELECT L, a, b FROM belt_colors").fetchall()
+        return np.array(rows, np.float32) if rows else None
 
     # ---- run sessions --------------------------------------------------------
     def start_session(self, batch_name=None):

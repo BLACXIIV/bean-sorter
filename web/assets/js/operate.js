@@ -7,10 +7,15 @@
 
   var st = null;              // last /api/status
   var grades = null;          // last /api/grades.php
+  var belt = null;            // last /api/belt.php
   var drawing = false;
   var linePts = [];
 
   $('cam').src = ENGINE + '/stream.mjpg';
+  var seg = document.createElement('span');     // detection-source chip in top bar
+  seg.className = 'chip';
+  seg.id = 'seg-chip';
+  $('engine-chip').parentNode.insertBefore(seg, $('engine-chip').nextSibling);
 
   function post(path, obj, cb) {
     fetch(ENGINE + path, {
@@ -50,16 +55,33 @@
     });
   }
 
-  /* ---------------- grade accordion ---------------- */
+  /* ---------------- accordion (conveyor + grades) ---------------- */
   var GC = { 1: 'var(--g1)', 2: 'var(--g2)', 3: 'var(--g3)', 4: 'var(--g4)' };
-  var openGrade = 1;
+  var openKey = 1;            // 'belt' | 1..4, one open at a time
   function renderGrades() {
     if (!grades) return;
     var h = '';
-    [1, 2, 3, 4].forEach(function (g) {
-      var d = grades[g], open = g === openGrade;
+    if (belt) {
+      var open = openKey === 'belt';
       h += '<div class="acc' + (open ? ' open' : '') + '">' +
-        '<div class="acc-h" data-g="' + g + '"><span class="dot" style="background:' + GC[g] + '"></span>' +
+        '<div class="acc-h" data-k="belt"><span class="dot" style="background:#343434"></span>' +
+        '<b>Conveyor</b><span class="cnt">' + belt.colors.length + ' colours</span></div>' +
+        '<div class="acc-b"><table><tr><th></th><th>#HEX</th><th>L a b</th><th></th></tr>';
+      belt.colors.forEach(function (c) {
+        h += '<tr><td><span class="swatch" style="background:' + c.hex + '"></span></td>' +
+          '<td class="mono">' + c.hex + '</td>' +
+          '<td>' + c.L.toFixed(0) + ' ' + c.a.toFixed(0) + ' ' + c.b.toFixed(0) + '</td>' +
+          '<td><button class="belt-del danger" data-id="' + c.id + '" ' +
+          'style="min-height:36px;min-width:44px">X</button></td></tr>';
+      });
+      h += '</table>' +
+        (belt.colors.length ? '<button id="belt-clear" class="danger" style="margin:6px">Clear all</button>' : '') +
+        '</div></div>';
+    }
+    [1, 2, 3, 4].forEach(function (g) {
+      var d = grades[g], open = g === openKey;
+      h += '<div class="acc' + (open ? ' open' : '') + '">' +
+        '<div class="acc-h" data-k="' + g + '"><span class="dot" style="background:' + GC[g] + '"></span>' +
         '<b>Grade ' + g + (g === 4 ? ' (DEFECT)' : '') + '</b>' +
         '<span class="cnt">' + d.samples + ' samples &middot; ' + d.colors.length + ' colours</span></div>' +
         '<div class="acc-b"><table><tr><th></th><th>#HEX</th><th>wt%</th><th>sample</th></tr>';
@@ -74,16 +96,47 @@
     $('grades').innerHTML = h;
     Array.prototype.forEach.call(document.querySelectorAll('.acc-h'), function (el) {
       el.onclick = function () {
-        var g = +el.dataset.g;
-        openGrade = (openGrade === g) ? 0 : g;
+        var k = el.dataset.k === 'belt' ? 'belt' : +el.dataset.k;
+        openKey = (openKey === k) ? 0 : k;
         renderGrades();
       };
     });
+    Array.prototype.forEach.call(document.querySelectorAll('.belt-del'), function (el) {
+      el.onclick = function () {
+        beltPost({ action: 'delete', id: +el.dataset.id });
+      };
+    });
+    var bc = $('belt-clear');
+    if (bc) bc.onclick = function () {
+      confirmModal('Delete ALL conveyor colours?').then(function (y) {
+        if (y) beltPost({ action: 'clear_all' });
+      });
+    };
   }
   function refreshGrades() {
     fetch('/api/grades.php').then(function (r) { return r.json(); })
       .then(function (j) { grades = j.grades; renderGrades(); updateStart(); })
       .catch(function () {});
+  }
+  function refreshBelt() {
+    fetch('/api/belt.php').then(function (r) { return r.json(); })
+      .then(function (j) {
+        belt = j;
+        var strip = '';
+        j.colors.slice(0, 8).forEach(function (c) {
+          strip += '<i style="background:' + c.hex + '"></i>';
+        });
+        $('belt-strip').innerHTML = strip;
+        renderGrades();
+      }).catch(function () {});
+  }
+  function beltPost(obj) {
+    fetch('/api/belt.php', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(obj)
+    }).then(function (r) { return r.json(); })
+      .then(function () { refreshBelt(); })
+      .catch(function () { toast('belt update failed'); });
   }
 
   /* ---------------- mode / panels ---------------- */
@@ -97,13 +150,19 @@
   $('m-run').onclick = function () { setPanel('run'); if (!st || st.mode !== 'run') post('/api/mode', { mode: 'idle' }); };
 
   /* ---------------- calibrate controls ---------------- */
+  var HINTS = { belt: 'Tap 3-5 empty belt spots (bright, dark and shadowed areas)' };
+  function hintFor(t) {
+    return t === 'belt' ? HINTS.belt
+      : 'Tap a bean on the camera to save its colours as Grade ' + t;
+  }
   document.querySelectorAll('.gbtn').forEach(function (b) {
     b.onclick = function () {
-      var g = +b.dataset.g;
-      post('/api/calibrate/select', { grade: g }, function () {
+      var t = b.dataset.t === 'belt' ? 'belt' : +b.dataset.t;
+      post('/api/calibrate/select', { target: t }, function (j) {
+        if (!j.ok) return;
         document.querySelectorAll('.gbtn').forEach(function (x) { x.classList.remove('on'); });
         b.classList.add('on');
-        $('cal-hint').textContent = 'Tap a bean on the camera to save its colours as Grade ' + g;
+        $('cal-hint').textContent = hintFor(t);
       });
     };
   });
@@ -111,12 +170,17 @@
     confirmModal('Capture the background now?<br><br>The tray must be <b>completely EMPTY</b>.')
       .then(function (y) { if (y) post('/api/calibrate/background', {}, function (j) { if (j.ok) toast('Background saved'); }); });
   };
-  $('btn-undo').onclick = function () { post('/api/calibrate/undo', {}, refreshGrades); };
+  $('btn-undo').onclick = function () {
+    post('/api/calibrate/undo', {}, function () { refreshGrades(); refreshBelt(); });
+  };
   $('btn-clear').onclick = function () {
-    confirmModal('Delete ALL samples of Grade ' + (st ? st.selected_grade : '?') + '?')
-      .then(function (y) {
-        if (y) post('/api/calibrate/clear', { grade: st ? st.selected_grade : 1 }, refreshGrades);
-      });
+    var t = st ? st.selected_target : 1;
+    var q = t === 'belt' ? 'Delete ALL conveyor colours?'
+      : 'Delete ALL samples of Grade ' + t + '?';
+    confirmModal(q).then(function (y) {
+      if (y) post('/api/calibrate/clear', { target: t },
+        function () { refreshGrades(); refreshBelt(); });
+    });
   };
   $('show-detected').onchange = function () {
     post('/api/calibrate/show-detected', { on: $('show-detected').checked });
@@ -146,7 +210,12 @@
     }
     if (st && st.mode === 'calibrate') {
       post('/api/calibrate/click', { nx: nx, ny: ny }, function (j) {
-        if (j.ok) { toast('Saved G' + j.grade, j.hex); refreshGrades(); }
+        if (j.ok) {
+          if (j.note) toast(j.note);
+          else if (j.id) toast('Belt colour saved', [j.hex]);
+          else toast('Saved G' + j.grade, j.hex);
+          refreshGrades(); refreshBelt();
+        }
       });
     }
   });
@@ -184,7 +253,8 @@
     $('btn-start').classList.toggle('hidden', running);
     $('btn-stop').classList.toggle('hidden', !running);
     var reason = '';
-    if (!st.has_background) reason = 'no background - capture it in CALIBRATE';
+    if (st.segmentation === 'none')
+      reason = 'no detection source - tap BELT colours or capture a background in CALIBRATE';
     else if (!grades || !(grades[4].samples > 0 && (grades[1].samples + grades[2].samples + grades[3].samples) > 0))
       reason = 'need samples: grade 4 + at least one of 1-3';
     else if (!st.line) reason = 'no sorting line - tap "Draw line"';
@@ -202,6 +272,20 @@
         $('engine-chip').innerHTML = j.mode + ' &middot; ' +
           (j.armed ? '<b style="color:var(--g4)">ARMED</b>' : 'DISARMED') +
           ' &middot; ' + j.fps + 'fps' + (j.sim ? ' &middot; <span class="sim">SIM</span>' : '');
+        $('seg-chip').textContent = 'Detection: ' +
+          (j.segmentation === 'belt_color' ? 'Conveyor color'
+            : j.segmentation === 'background' ? 'Background' : 'None');
+        var w = $('belt-warn');
+        if (j.warnings && j.warnings.length) {
+          w.innerHTML = j.warnings.join('<br>');
+          w.classList.remove('hidden');
+        } else {
+          w.classList.add('hidden');
+        }
+        document.querySelectorAll('.gbtn').forEach(function (x) {
+          var t = x.dataset.t === 'belt' ? 'belt' : +x.dataset.t;
+          x.classList.toggle('on', t === j.selected_target);
+        });
         if (j.mode === 'calibrate') setPanel('cal');
         if (j.mode === 'run') setPanel('run');
         ['g1', 'g2', 'g3', 'g4'].forEach(function (k, i) { $('c' + (i + 1)).textContent = j.counts[k]; });
@@ -218,6 +302,8 @@
       });
   }
   setInterval(poll, 500); poll();
-  setInterval(function () { if (st && st.mode === 'calibrate') refreshGrades(); }, 3000);
-  refreshGrades();
+  setInterval(function () {
+    if (st && st.mode === 'calibrate') { refreshGrades(); refreshBelt(); }
+  }, 3000);
+  refreshGrades(); refreshBelt();
 })();

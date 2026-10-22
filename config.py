@@ -26,6 +26,12 @@ DIFF_THRESHOLD = 30         # higher = less sensitive to shadows/noise
 MIN_BEAN_AREA = 400         # px^2, ignore smaller blobs
 MAX_BEAN_AREA = 30000       # px^2, ignore larger blobs (touching clumps, hands)
 
+# ---- Conveyor belt colour model ------------------------------------------------
+BELT_TOLERANCE = 18.0       # weighted Lab distance; closer pixels count as belt
+BELT_L_WEIGHT = 0.5         # <1.0 = brightness matters less (shadows stay belt)
+BELT_MAX_COLORS = 8         # max saved conveyor colours
+BELT_PATCH = 21             # px square sampled on a belt tap
+
 # ---- Colour model ------------------------------------------------------------
 PALETTE_K = 3               # main colours extracted per bean
 MAX_PIXELS = 400            # pixels sampled per bean for k-means

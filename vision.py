@@ -29,8 +29,55 @@ def segment(frame, bg):
     return mask
 
 
-def find_beans(frame, bg):
-    mask = segment(frame, bg)
+class BeltModel:
+    """Saved conveyor colours: pixels close to any of them are belt, not beans.
+
+    Weighted Lab distance, d^2 = (w_L*dL)^2 + da^2 + db^2; a pixel is conveyor
+    when its nearest saved colour is < tolerance."""
+
+    def __init__(self, colors_lab, tolerance=None, l_weight=None):
+        self.colors = np.asarray(colors_lab, np.float32).reshape(-1, 3)
+        self.tolerance = tolerance      # None -> read config at call time
+        self.l_weight = l_weight
+
+    def _params(self):
+        tol = C.BELT_TOLERANCE if self.tolerance is None else self.tolerance
+        lw = C.BELT_L_WEIGHT if self.l_weight is None else self.l_weight
+        return float(tol), float(lw)
+
+    def bean_mask(self, frame_bgr):
+        """uint8 mask, 255 = not conveyor (same size as the frame)."""
+        tol, lw = self._params()
+        small = cv2.resize(frame_bgr, None, fx=0.5, fy=0.5,
+                           interpolation=cv2.INTER_AREA)
+        small = cv2.GaussianBlur(small, (3, 3), 0)
+        lab = cv2.cvtColor(small.astype(np.float32) / 255.0, cv2.COLOR_BGR2Lab)
+        diff = lab[:, :, None, :] - self.colors[None, None, :, :]   # (h,w,M,3)
+        diff[..., 0] *= lw
+        min_d2 = (diff * diff).sum(axis=3).min(axis=2)              # (h,w)
+        mask = np.where(min_d2 >= tol * tol, 255, 0).astype(np.uint8)
+        return cv2.resize(mask, (frame_bgr.shape[1], frame_bgr.shape[0]),
+                          interpolation=cv2.INTER_NEAREST)
+
+    def filter_pixels(self, pix_bgr):
+        """Drop pixels that are within tolerance of any conveyor colour."""
+        if len(pix_bgr) == 0:
+            return pix_bgr
+        tol, lw = self._params()
+        lab = bgr_to_lab(pix_bgr)
+        diff = lab[:, None, :] - self.colors[None, :, :]            # (N,M,3)
+        diff[..., 0] *= lw
+        keep = (diff * diff).sum(axis=2).min(axis=1) >= tol * tol
+        return pix_bgr[keep]
+
+
+def find_beans(frame, bg, belt=None):
+    if belt is not None:
+        mask = belt.bean_mask(frame)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, _K3)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, _K5)
+    else:
+        mask = segment(frame, bg)
     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     beans = []
     for c in cnts:
@@ -44,17 +91,17 @@ def find_beans(frame, bg):
     return beans
 
 
-def bean_at(frame, bg, pt):
+def bean_at(frame, bg, pt, belt=None):
     """The detected bean under (or within 6 px of) the clicked point."""
     best, best_d = None, -1e9
-    for b in find_beans(frame, bg):
+    for b in find_beans(frame, bg, belt):
         d = cv2.pointPolygonTest(b.contour, (float(pt[0]), float(pt[1])), True)
         if d >= -6 and d > best_d:
             best, best_d = b, d
     return best
 
 
-def bean_pixels(frame, contour):
+def bean_pixels(frame, contour, belt=None):
     """BGR pixels inside the bean (edges eroded away, specular glare removed)."""
     x, y, w, h = cv2.boundingRect(contour)
     roi = frame[y:y + h, x:x + w]
@@ -68,6 +115,10 @@ def bean_pixels(frame, contour):
     keep = pix.min(axis=1) < 235
     if keep.sum() >= 30:
         pix = pix[keep]
+    if belt is not None:
+        filtered = belt.filter_pixels(pix)
+        if len(filtered) >= 30:
+            pix = filtered
     return pix
 
 
@@ -135,3 +186,20 @@ class Classifier:
         if raw[best] > C.UNKNOWN_DE:      # looks like nothing we know -> reject it
             best = 4
         return best, raw
+
+
+def belt_warnings(belt_colors_lab, grade_model, tolerance, l_weight):
+    """Warn when a grade's saved colours sit close to a conveyor colour -
+    beans of that grade could be swallowed by the belt mask."""
+    if belt_colors_lab is None or len(belt_colors_lab) == 0 or not grade_model:
+        return []
+    belt = np.asarray(belt_colors_lab, np.float32).reshape(-1, 3)
+    out = []
+    for g in sorted(grade_model):
+        diff = belt[:, None, :] - grade_model[g][None, :, :]
+        diff[..., 0] *= l_weight
+        d = float(np.sqrt((diff * diff).sum(axis=2)).min())
+        if d < tolerance + 5:
+            out.append(f"Grade {g} colors are close to the conveyor color "
+                       f"(dE {d:.1f}) - beans may be missed")
+    return out

@@ -94,8 +94,9 @@ class Sorter:
     """One frame in -> annotated frame out. Counts beans crossing `line`;
     grade-4 crossings pulse the valve while armed."""
 
-    def __init__(self, db, bg, classifier, line, valve, session_id=None):
+    def __init__(self, db, bg, classifier, line, valve, session_id=None, belt=None):
         self.db, self.bg, self.clf, self.line, self.valve = db, bg, classifier, line, valve
+        self.belt = belt
         self.session_id = session_id
         self.tracker = Tracker()
         self.stats = Counter()
@@ -109,12 +110,12 @@ class Sorter:
 
     def process(self, frame, armed=True):
         self.idx += 1
-        matched = self.tracker.update(vision.find_beans(frame, self.bg), self.idx)
+        matched = self.tracker.update(vision.find_beans(frame, self.bg, self.belt), self.idx)
         now = time.perf_counter()
 
         for t, b in matched:
             if sum(t.votes.values()) < C.MAX_VOTES:
-                pal = vision.extract_palette(vision.bean_pixels(frame, b.contour))
+                pal = vision.extract_palette(vision.bean_pixels(frame, b.contour, self.belt))
                 if pal:
                     t.votes[self.clf.classify(pal)[0]] += 1
             grade = t.decide()
@@ -144,14 +145,14 @@ class Sorter:
 
 
 # -------------------------------------------------------------- calibration
-def calibrate_click(db, frame, bg, pt, grade):
+def calibrate_click(db, frame, bg, pt, grade, belt=None):
     """Save the palette of the bean under pixel point `pt` as `grade`.
 
     Returns (contour, centroid, palette) on success, or an error string."""
-    bean = vision.bean_at(frame, bg, pt)
+    bean = vision.bean_at(frame, bg, pt, belt)
     if bean is None:
         return "No bean detected there - click the bean centre"
-    pal = vision.extract_palette(vision.bean_pixels(frame, bean.contour))
+    pal = vision.extract_palette(vision.bean_pixels(frame, bean.contour, belt))
     if not pal:
         return "Bean too small / not enough pixels"
     db.add_sample(grade, int(bean.centroid[0]), int(bean.centroid[1]), bean.area, pal)

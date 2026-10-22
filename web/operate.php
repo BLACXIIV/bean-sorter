@@ -14,6 +14,7 @@ page_head('Operate', 'operate', false);
         <div><b class="n" id="c4" style="color:var(--g4)">0</b><span>G4</span></div>
         <div><b class="n" id="cb">0</b><span>Blown</span></div>
       </div>
+      <div id="belt-warn" class="warnstrip hidden"></div>
     </div>
     <div class="controls">
       <div class="seg">
@@ -23,15 +24,16 @@ page_head('Operate', 'operate', false);
 
       <div id="panel-cal">
         <div class="btnrow">
-          <button class="gbtn" data-g="1">G1</button>
-          <button class="gbtn" data-g="2">G2</button>
-          <button class="gbtn" data-g="3">G3</button>
-          <button class="gbtn" data-g="4">G4 DEFECT</button>
+          <button class="gbtn" data-t="1">G1</button>
+          <button class="gbtn" data-t="2">G2</button>
+          <button class="gbtn" data-t="3">G3</button>
+          <button class="gbtn" data-t="4">G4 DEFECT</button>
+          <button class="gbtn belt" data-t="belt">BELT<span id="belt-strip"></span></button>
         </div>
         <div class="btnrow">
-          <button id="btn-bg">Capture background</button>
+          <button id="btn-bg" class="secondary">Background (optional)</button>
           <button id="btn-undo">Undo</button>
-          <button id="btn-clear" class="danger">Clear grade</button>
+          <button id="btn-clear" class="danger">Clear</button>
           <label class="toggle" style="margin-left:auto">
             <input type="checkbox" id="show-detected">Show detected</label>
         </div>

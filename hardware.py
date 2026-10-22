@@ -105,12 +105,15 @@ class WebcamCamera:
 class SimulatedCamera:
     """Synthetic frames for testing without any hardware.
 
-    set_scene("empty")   plain light-gray tray + noise  (for background capture)
-    set_scene("static")  4x4 grid: column 1..4 = grade 1..4 at GRID_X x GRID_Y
-    set_scene("moving")  random beans (~75 % grades 1-3, ~25 % grade 4) falling
-                         down the frame at ~25 px/frame, crossing the middle.
+    Blue conveyor with 3 darker horizontal seams; in "moving" the seams scroll
+    with the beans. set_scene("empty") = belt only; "static" = belt + a 4x4
+    grid, column 1..4 = grade 1..4 at GRID_X x GRID_Y; "moving" = random beans
+    (~75 % grades 1-3, ~25 % grade 4) falling at ~25 px/frame, crossing mid.
     """
 
+    BELT_BGR = (150, 110, 60)                     # blue conveyor
+    SEAM_DARKER = (12, 24, 36)                    # per-seam darkening (BGR units)
+    SEAM_T = 14                                   # seam line thickness, px
     GRADE_BGR = {1: (40, 90, 150), 2: (45, 80, 125), 3: (50, 70, 100), 4: (25, 30, 40)}
     PATCH_BGR = (30, 120, 190)                    # yellow-brown defect patch on G4
     GRID_X = (160, 480, 800, 1120)                # column per grade
@@ -124,15 +127,26 @@ class SimulatedCamera:
         self._rng = np.random.default_rng(7)
         self._scene = "empty"
         self._beans = []
+        self._seam_y = [self._h // 4, self._h // 2, 3 * self._h // 4]
         self.settings = None
 
     def set_scene(self, scene):
         self._scene = scene
         self._beans = []
 
+    def _belt(self):
+        frame = np.tile(np.array(self.BELT_BGR, np.uint8), (self._h, self._w, 1))
+        if self._scene == "moving":
+            self._seam_y = [(y + self.SPEED) % self._h for y in self._seam_y]
+        for y, dark in zip(self._seam_y, self.SEAM_DARKER):
+            bgr = tuple(max(0, c - dark) for c in self.BELT_BGR)
+            cv2.rectangle(frame, (0, y - self.SEAM_T // 2),
+                          (self._w, y + self.SEAM_T // 2), bgr, -1)
+        return frame
+
     def read(self):
         time.sleep(0.03)                          # ~30 fps, like a real camera
-        frame = np.full((self._h, self._w, 3), 190, np.uint8)
+        frame = self._belt()
         if self._scene == "static":
             for g, x in enumerate(self.GRID_X, start=1):
                 for y in self.GRID_Y:
