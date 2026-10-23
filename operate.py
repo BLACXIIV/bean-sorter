@@ -80,18 +80,18 @@ def _loop(cam, db, valve, bg, clf, line):
     while True:
         frame = cam.read()
         now = time.perf_counter()
-        sorter.process(frame, armed)
+        view = sorter.process(frame, armed, t=now)
 
         fps = 0.9 * fps + 0.1 / max(1e-6, now - t_prev)
         t_prev = now
         stats, blown = sorter.stats, sorter.blown
-        ui.draw_panel(frame, [
+        ui.draw_panel(view, [
             ("ARMED - valve active" if armed else "DISARMED - valve OFF (counting only)")
             + f"   {fps:4.1f} fps",
             f"G1:{stats['g1']}  G2:{stats['g2']}  G3:{stats['g3']}  G4:{stats['g4']}   blown:{blown}",
             "A = arm/disarm   V = test valve   L = redraw line   Q = quit"],
             color=(0, 255, 0) if armed else (0, 200, 255))
-        ui.show(WIN, frame, C.DISPLAY_SCALE)
+        ui.show(WIN, view, C.DISPLAY_SCALE)
 
         k = cv2.waitKey(1) & 0xFF
         if k in (ord("q"), 27):

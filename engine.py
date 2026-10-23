@@ -40,7 +40,9 @@ ALLOWED_ORIGINS = {"http://127.0.0.1:8080", "http://localhost:8080"}
 # settings keys the web UI may tune (validated server-side by PHP)
 TUNABLES = ("DEFECT_BIAS", "UNKNOWN_DE", "VALVE_DELAY_S", "VALVE_PULSE_S",
             "DIFF_THRESHOLD", "MIN_BEAN_AREA", "MAX_BEAN_AREA", "DEFECT_VOTE_RATIO",
-            "BELT_TOLERANCE", "BELT_L_WEIGHT")
+            "BELT_TOLERANCE", "BELT_L_WEIGHT",
+            "TRACK_MAX_COAST_S", "TRACK_REID_DE",
+            "DEDUPE_RADIUS_PX", "DEDUPE_WINDOW_S")
 
 
 class Engine:
@@ -70,6 +72,7 @@ class Engine:
         self.armed = False
         self.selected_target = 1    # "belt" | 1 | 2 | 3 | 4
         self.show_detected = False
+        self.show_tracks = False
         self.message = "Engine started"
         self.session_id = None
         self.sorter = None
@@ -77,6 +80,7 @@ class Engine:
         self.belt = self._load_belt()
         self.clf = vision.Classifier(self.db.load_model())
         self.line = self._load_line()
+        self._push_line()
         self.undo_stack = deque(maxlen=20)   # ("sample"|"belt", row id)
 
         self.fps = 0.0
@@ -87,10 +91,18 @@ class Engine:
         self._stop = False
         self._t0 = time.perf_counter()
         # stage timings: ms totals + frame counts, reset each log window
-        self.tim = {"cam": 0.0, "jpeg": 0.0, "find": 0.0, "cls": 0.0, "draw": 0.0}
+        self.tim = {"cam": 0.0, "jpeg": 0.0, "find": 0.0, "cls": 0.0,
+                    "track": 0.0, "draw": 0.0}
         self.tim_n = 0
+        self.fps_cap = 0.0                # --fps-cap throttle (testing)
 
     # ---------------------------------------------------------------- helpers
+    def _push_line(self):
+        """Tell a camera that can use it (the sim) where the sorting line is,
+        so it can keep physical-crossing ground truth. Duck-typed, optional."""
+        if hasattr(self.cam, "set_sort_line"):
+            self.cam.set_sort_line(self.line)
+
     def _load_line(self):
         pts = self.db.get_json("line")
         if pts and len(pts) == 2:
@@ -137,8 +149,10 @@ class Engine:
             now = time.perf_counter()
             self.tim["cam"] += (now - t_read0) * 1000
             self.tim_n += 1
+            view = frame
             if self.mode == "run" and self.sorter is not None:
-                self.sorter.process(frame, self.armed, self.tim)
+                view = self.sorter.process(frame, self.armed, self.tim, t=now,
+                                           annotate=self.stream_clients > 0)
             elif self.mode == "calibrate":
                 if self.show_detected:
                     beans = vision.find_beans(frame, self.bg, self.belt) \
@@ -175,7 +189,7 @@ class Engine:
             # encode only while a client is watching, max 15 fps
             if self.stream_clients and now - last_enc >= 1.0 / STREAM_FPS:
                 t_enc0 = time.perf_counter()
-                small = cv2.resize(frame, (STREAM_W, STREAM_H), interpolation=cv2.INTER_AREA)
+                small = cv2.resize(view, (STREAM_W, STREAM_H), interpolation=cv2.INTER_AREA)
                 ok, jpg = cv2.imencode(".jpg", small,
                                        [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
                 self.tim["jpeg"] += (time.perf_counter() - t_enc0) * 1000
@@ -188,14 +202,20 @@ class Engine:
             # per-stage timing log every 5 s (DEBUG)
             if now - last_log >= 5.0:
                 n = max(1, self.tim_n)
-                log.debug("ms/frame  cam=%.1f find=%.1f cls=%.1f draw=%.1f "
-                          "jpeg=%.1f  -> %.1f fps (%d frames)",
+                log.debug("ms/frame  cam=%.1f find=%.1f cls=%.1f track=%.1f "
+                          "draw=%.1f jpeg=%.1f  -> %.1f fps (%d frames)",
                           self.tim["cam"] / n, self.tim["find"] / n,
-                          self.tim["cls"] / n, self.tim["draw"] / n,
+                          self.tim["cls"] / n, self.tim["track"] / n,
+                          self.tim["draw"] / n,
                           self.tim["jpeg"] / n, self.fps, self.tim_n)
                 for k in self.tim:
                     self.tim[k] = 0.0
                 self.tim_n = 0
+
+            # --fps-cap: throttle the whole loop (e.g. mimic a slow Pi)
+            if self.fps_cap > 0:
+                time.sleep(max(0.0, 1.0 / self.fps_cap
+                               - (time.perf_counter() - t_read0)))
                 last_log = now
 
     # ----------------------------------------------------------------- modes
@@ -205,7 +225,9 @@ class Engine:
         with self.lock:
             if self.mode == "run" and mode != "run":
                 if self.session_id is not None:
-                    self.db.end_session(self.session_id)
+                    self.db.end_session(
+                        self.session_id,
+                        self.sorter.trk_counters() if self.sorter else None)
                 self.session_id, self.sorter, self.armed = None, None, False
             if mode == "run":
                 if self.segmentation() == "none":
@@ -219,6 +241,7 @@ class Engine:
                 self.session_id = self.db.start_session(batch_name)
                 self.sorter = Sorter(self.db, self.bg, self.clf, self.line,
                                      self.valve, self.session_id, belt=self.belt)
+                self.sorter.show_tracks = self.show_tracks
                 self.armed = True
                 if self.sim:
                     self.cam.set_scene("moving")
@@ -237,6 +260,10 @@ class Engine:
         if self.line is not None:
             line = {"p1": [self.line.p1[0] / FRAME_W, self.line.p1[1] / FRAME_H],
                     "p2": [self.line.p2[0] / FRAME_W, self.line.p2[1] / FRAME_H]}
+        gt = ({"spawned": self.cam.spawned_total,
+               "crossed": self.cam.crossed_total,
+               "defects": self.cam.crossed_defects}
+              if hasattr(self.cam, "crossed_total") else None)
         return {"mode": self.mode, "armed": self.armed, "fps": round(self.fps, 1),
                 "sim": self.sim or self.valve_source == "sim",
                 "camera_source": ("webcam" if self.camera_source.startswith("webcam")
@@ -250,7 +277,14 @@ class Engine:
                 "belt_count": len(self.belt.colors) if self.belt is not None else 0,
                 "warnings": self._warnings(),
                 "show_detected": self.show_detected,
+                "show_tracks": self.show_tracks,
+                "tracking": (self.sorter.trk_counters() if self.sorter is not None
+                           else {"active": 0, "coasting": 0, "unique_crossed": 0,
+                                 "suppressed": 0, "estimated": 0,
+                                 "lost_before_line": 0,
+                                 "enabled": bool(C.FEATURES.get("trajectory_tracking"))}),
                 "session_id": self.session_id, "counts": counts,
+                "ground_truth": gt,
                 "message": self.message}
 
 
@@ -262,8 +296,9 @@ def ok(**kw):
     return jsonify({"ok": True, **kw})
 
 
-def err(msg):
-    return jsonify({"ok": False, "error": msg}), 400
+def err(msg, code="BAD_REQUEST"):
+    """Human-readable error plus a stable machine code (AGENTS.md 6.4)."""
+    return jsonify({"ok": False, "error": msg, "code": code}), 400
 
 
 def body():
@@ -364,7 +399,7 @@ def api_select():
 
 def _belt_click(frame, pt):
     """BELT_PATCH square around pt -> median Lab colour, uniformity checked.
-    Returns (error_string | None, response)."""
+    Returns (error_tuple(code,msg) | None, response)."""
     p = C.BELT_PATCH // 2
     x0, x1 = int(max(0, pt[0] - p)), int(min(FRAME_W, pt[0] + p + 1))
     y0, y1 = int(max(0, pt[1] - p)), int(min(FRAME_H, pt[1] + p + 1))
@@ -373,7 +408,8 @@ def _belt_click(frame, pt):
     med = np.median(lab, axis=0)
     std = lab.std(axis=0)
     if std[1] > 10 or std[2] > 10 or std[0] > 25:
-        return "Patch not uniform - tap plain belt, not a bean or seam", None
+        return ("PATCH_NOT_UNIFORM",
+                "Patch not uniform - tap plain belt, not a bean or seam"), None
     if E.belt is not None:
         diff = E.belt.colors - med
         diff[:, 0] *= C.BELT_L_WEIGHT
@@ -381,7 +417,9 @@ def _belt_click(frame, pt):
             return None, ok(note="already covered")
     if E.db.conn.execute("SELECT COUNT(*) FROM belt_colors").fetchone()[0] \
             >= C.BELT_MAX_COLORS:
-        return f"max {C.BELT_MAX_COLORS} conveyor colours - clear one first", None
+        return ("BELT_LIMIT",
+                f"max {C.BELT_MAX_COLORS} conveyor colours - clear one first"), \
+            None
     hexv = vision.lab_to_hex(med)
     cid = E.db.add_belt_color(med, hexv)
     E.belt = E._load_belt()
@@ -404,29 +442,35 @@ def _patch_palette(frame, pt):
 @app.route("/api/calibrate/click", methods=["POST", "OPTIONS"])
 def api_click():
     if E.mode != "calibrate":
-        return err("switch to calibrate mode first")
+        return err("switch to calibrate mode first", "WRONG_MODE")
     b = body()
     try:
         pt = (float(b["nx"]) * FRAME_W, float(b["ny"]) * FRAME_H)
     except (KeyError, TypeError, ValueError):
         return err("need nx, ny in 0..1")
-    frame = E.cam.read()
+    try:
+        frame = E.cam.read()
+    except Exception:
+        return err("camera read failed", "CAMERA_ERROR")
     if E.selected_target == "belt":
         error, resp = _belt_click(frame, pt)
-        return err(error) if error else resp
+        return err(error[1], error[0]) if error else resp
     pal = None
     if E.segmentation() != "none":
         res = calibrate_click(E.db, frame, E.bg, pt, E.selected_target, E.belt)
         if not isinstance(res, str):          # bean blob found -> normal save
             _, _, pal = res
         elif not res.startswith("No bean detected"):
-            return err(res)
+            return err(res, "TOO_FEW_PIXELS" if "too small" in res
+                       else "BAD_REQUEST")
     if pal is None:
         # dev fallback: grab the colour patch under the tap even when no bean
         # blob (or no detection source at all) is there
         pal, (x, y), area = _patch_palette(frame, pt)
         if not pal:
-            return err("No colour at that point")
+            return err("No colour at that point",
+                       "NO_BEAN_AT_POINT" if E.segmentation() != "none"
+                       else "NO_SEGMENTATION_SOURCE")
         E.db.add_sample(E.selected_target, x, y, area, pal)
         E.message = f"Saved G{E.selected_target} (patch)"
     else:
@@ -482,6 +526,7 @@ def api_line():
             E.set_mode("idle")          # no line -> nothing to sort on
         E.db.set_json("line", None)
         E.line = None
+        E._push_line()
         return ok()
     try:
         p1 = (int(float(b["p1"][0]) * FRAME_W), int(float(b["p1"][1]) * FRAME_H))
@@ -490,9 +535,18 @@ def api_line():
         return err('need {"p1":[nx,ny],"p2":[nx,ny]}')
     E.db.set_json("line", [list(p1), list(p2)])
     E.line = Line(p1, p2)
+    E._push_line()
     if E.sorter is not None:
         E.sorter.set_line(E.line)
     return ok()
+
+
+@app.route("/api/run/show-tracks", methods=["POST", "OPTIONS"])
+def api_tracks():
+    E.show_tracks = bool(body().get("on"))
+    if E.sorter is not None:
+        E.sorter.show_tracks = E.show_tracks
+    return ok(on=E.show_tracks)
 
 
 @app.route("/api/valve/test", methods=["POST", "OPTIONS"])
@@ -533,6 +587,8 @@ def main():
     ap.add_argument("--port", type=int, default=5000)
     ap.add_argument("--list-cameras", action="store_true",
                     help="probe webcam indices 0-4 and exit")
+    ap.add_argument("--fps-cap", type=float, default=0.0,
+                    help="cap the processing loop at N fps (testing)")
     args = ap.parse_args()
 
     if args.list_cameras:
@@ -544,6 +600,7 @@ def main():
         cam_src, valve_src = "sim", "sim"
 
     E = Engine(cam_src, valve_src)
+    E.fps_cap = args.fps_cap
     threading.Thread(target=E.loop, daemon=True).start()
 
     def _sig(signum, frame):

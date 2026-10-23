@@ -38,8 +38,9 @@
         if (!r.ok) {
           console.warn('post ' + path + ' HTTP ' + r.status + ' ' +
             Math.round(performance.now() - t0) + 'ms body=' + txt.slice(0, 120));
-          toast(j && j.error ? j.error
-                             : (label || path) + ' failed: HTTP ' + r.status);
+          var msg = j && j.error ? j.error
+                               : (label || path) + ' failed: HTTP ' + r.status;
+          toast(j && j.code ? j.code + ': ' + msg : msg);
           return;
         }
         if (!j) {
@@ -49,7 +50,7 @@
           return;
         }
         if (cb) cb(j);
-        if (!j.ok && j.error) toast(j.error);
+        if (!j.ok && j.error) toast(j.code ? j.code + ': ' + j.error : j.error);
       });
     }).catch(function (e) {
       console.warn('post ' + path + ' ' + e.name + ' ' + e.message + ' ' +
@@ -269,6 +270,9 @@
     post('/api/arm', { armed: !(st && st.armed) });
   };
   $('btn-valve').onclick = function () { post('/api/valve/test', {}); };
+  $('btn-tracks').onclick = function () {
+    post('/api/run/show-tracks', { on: !(st && st.show_tracks) });
+  };
   $('btn-start').onclick = function () {
     post('/api/mode', { mode: 'run', batch_name: $('batch').value || null }, function (j) {
       if (j.ok) toast('Run started');
@@ -333,6 +337,13 @@
         if (j.mode === 'run') setPanel('run');
         ['g1', 'g2', 'g3', 'g4'].forEach(function (k, i) { $('c' + (i + 1)).textContent = j.counts[k]; });
         $('cb').textContent = j.counts.blown;
+        var tr = j.tracking || {};
+        $('track-stats').textContent = tr.enabled === false ? '' :
+          'Unique ' + (tr.unique_crossed || 0) +
+          ' - duplicates suppressed ' + (tr.suppressed || 0) +
+          ' - estimated ' + (tr.estimated || 0) +
+          ' - lost before line ' + (tr.lost_before_line || 0);
+        $('btn-tracks').textContent = j.show_tracks ? 'Tracks: ON' : 'Tracks';
         $('btn-arm').textContent = j.armed ? 'DISARM' : 'ARM';
         $('show-detected').checked = !!j.show_detected;
         updateStart();

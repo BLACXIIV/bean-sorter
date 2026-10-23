@@ -70,6 +70,22 @@ opens the browser, and stops both when the window closes. Deps:
 Webcam auto white balance / exposure can drift – webcam colours are for **UI/flow
 testing only**; always recalibrate on the Pi.
 
+### Dev/test tooling (laptop only, never needed on the Pi)
+
+```powershell
+pip install -r requirements-dev.txt
+playwright install chromium        # only for tests/test_ui_click_mapping.py
+python scripts/check.py            # py_compile + php -l + all tests/test_*.py
+python scripts/smoke.py            # clean boot: engine health, calib click, operate.php
+python scripts/simrun.py 120       # calibrated sim run + ground-truth assert
+python scripts/a3_matrix.py        # 120s x {clean, 10% drop, 10% drop @8fps} x {traj, legacy}
+python tests/test_ui_click_mapping.py   # needs php CLI + playwright
+python -m vermin --target=3.11- .  # Python 3.11 compatibility audit
+```
+
+`engine.py` also accepts `--fps-cap N` (sleep to at most N fps in the processing
+loop; used to simulate a slow CPU such as 8 fps).
+
 ## 3. Use
 
 ```bash
@@ -97,6 +113,28 @@ python3 main.py status            # see stored hex colours per grade
 
 ## 4. Tuning (`config.py`)
 - `VALVE_DELAY_S` = (distance line→nozzle ÷ bean speed) – small latency. Start at 0 and adjust. `VALVE_PULSE_S` 0.03–0.1 s.
+- Trajectory tracking (`tracking.py`, `FEATURES["trajectory_tracking"]`, default on): every bean keeps ONE identity
+  from first sight to the line via a Kalman filter + Hungarian association, so each physical bean is counted
+  (and blown, if grade 4) exactly once - even through detection dropouts (`TRACK_MAX_COAST_S`), brief occlusion,
+  low frame rates, or beans vibrating on the line. `FEATURES["trajectory_tracking"] = False` restores the old
+  nearest-neighbour tracker (`LegacyTracker`).
+- Tunables (seconds and pixels, frame-rate independent; the four marked * are editable in admin → Settings):
+  `TRACK_MIN_HITS`, `TRACK_MAX_COAST_S`*, `TRACK_GATE_MIN_PX`, `TRACK_GATE_SPEED_FACTOR`,
+  `TRACK_REID_WINDOW_S`, `TRACK_REID_DE`*, `TRACK_AREA_RATIO`, `TRACK_MIN_SPACING_FACTOR`,
+  `DEDUPE_RADIUS_PX`*, `DEDUPE_WINDOW_S`*, `TRAIL_LEN`, `TRACK_HUNGARIAN_MAX`
+  (greedy-by-cost association above this many tracks/detections, default 40).
+- Duplicate suppression is fail-safe: it can only drop a weakly-established track
+  (tentative / re-identified / estimated / <5 hits) that matches a recent crossing in
+  position, a speed-aware time window AND palette dE - a real bean is never suppressed.
+- Operate screen: the **Tracks** button (`POST /api/run/show-tracks`) draws fading trails + `#id` labels, and a
+  line under the counters shows unique crossings / suppressed duplicates / estimated crossings / beans lost.
+- `BEAN_RECORD=<file>` makes the engine append one JSON line per frame (t, detections, palettes, votes) for
+  offline tuning; `python tools/replay_tracking.py <file>` replays it through the tracker and prints counts,
+  suppressed/estimated/lost and per-track summaries. Off by default.
+- Verification hooks (dev only): `BEAN_DROP=0.1` randomly drops detections before the tracker,
+  `BEAN_LEGACY=1` forces the legacy tracker; SimulatedCamera counts physical line crossings
+  (`/api/status` -> `ground_truth`), and `scripts/simrun.py <seconds>` runs a calibrated sim and
+  asserts tracked crossings == physical crossings, blown == physical defects.
 - Defects missed → lower `DEFECT_BIAS` (e.g. 0.7) or calibrate more grade 4 samples.
   Good beans blown → raise `DEFECT_BIAS` (e.g. 1.0) or add more grade 1–3 samples.
 - `UNKNOWN_DE`: anything further than this from *every* grade (stones, husks…) is treated as grade 4.
@@ -106,9 +144,18 @@ python3 main.py status            # see stored hex colours per grade
 
 ## 5. What is stored (`data/beans.db`)
 `samples` (one row per clicked bean) · `grade_colors` (hex + Lab + weight of every colour, per grade) ·
-`background` (empty-tray image) · `settings` (locked camera exposure/white balance, sorting line) · `sort_log` (every bean that crossed the line).
+`background` (empty-tray image) · `settings` (locked camera exposure/white balance, sorting line) · `sort_log`
+(every bean that crossed the line, with `track_id`, `crossing_type` observed/estimated/tentative, `x_on_line`,
+`speed_px_s`) · `run_sessions` (per run, incl. `suppressed`, `estimated`, `lost` counters).
 
 ## 6. Known limits
-- Beans that touch each other are detected as one blob (ignored if too big). Use a vibrating feeder / single-file chute.
+- **Beans that touch each other are detected as ONE blob** (measured: S17, 20% of
+  beans travelling touching at 1.8–2.1× bean area → trajectory undercount 3/30 and
+  one grade-4 bean not blown; tests mark this XFAIL). A merged blob also fails
+  `TRACK_AREA_RATIO` re-id. Use a vibrating feeder / single-file chute — this is a
+  segmentation limit, not fixable by tracking.
+- Beans that overlap in the same lane for many frames (impossible physically, but
+  the S15-overlap stress case) merge into one detection → undercount
+  (measured: 30–32 counted of 32 over 20 seeds, XFAIL).
 - Exposure and white balance are locked at first calibration so colours match later; if you change lights/camera, run `calibrate --fresh`.
 - Colour only – no shape/size grading. Test the valve air pressure and nozzle aim with `V` before real runs.

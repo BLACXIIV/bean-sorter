@@ -31,7 +31,8 @@ echo '<div class="btnrow">',
 if ($tab === 'runs') {
     $rows = run_rows($db, $from, $to, $run);
     echo '<div class="card"><table><tr><th>Run #</th><th>Batch</th><th>Start</th><th>End</th>',
-         '<th>Duration</th><th>Total</th><th>G1</th><th>G2</th><th>G3</th><th>G4</th><th>Defect %</th><th>Blown</th></tr>';
+         '<th>Duration</th><th>Total</th><th>G1</th><th>G2</th><th>G3</th><th>G4</th><th>Defect %</th><th>Blown</th>',
+         '<th>Suppressed</th><th>Estimated</th><th>Lost</th></tr>';
     foreach ($rows as $r) {
         $t = $r['g1'] + $r['g2'] + $r['g3'] + $r['g4'];
         echo '<tr><td>#' . (int)$r['id'] . '</td><td>' . e($r['batch_name']) . '</td>',
@@ -39,7 +40,10 @@ if ($tab === 'runs') {
              '<td>' . e(duration_s($r['started_at'], $r['ended_at'])) . '</td><td>' . $t . '</td>',
              '<td>' . (int)$r['g1'] . '</td><td>' . (int)$r['g2'] . '</td><td>' . (int)$r['g3'] . '</td>',
              '<td>' . (int)$r['g4'] . '</td><td>' . e(defect_pct((int)$r['g4'], $t)) . '</td>',
-             '<td>' . (int)$r['blown'] . '</td></tr>';
+             '<td>' . (int)$r['blown'] . '</td>',
+             '<td>' . (int)($r['suppressed'] ?? 0) . '</td>',
+             '<td>' . (int)($r['estimated'] ?? 0) . '</td>',
+             '<td>' . (int)($r['lost'] ?? 0) . '</td></tr>';
     }
     echo '</table></div>';
 } elseif ($tab === 'daily') {
@@ -74,10 +78,17 @@ if ($tab === 'runs') {
     $page = min($page, $pages);
     $st = $db->prepare("SELECT * FROM sort_log $where ORDER BY id DESC LIMIT 50 OFFSET " . (($page - 1) * 50));
     $st->execute($a);
-    echo '<div class="card"><table><tr><th>Time</th><th>Run #</th><th>Grade</th><th>Blown</th></tr>';
+    echo '<div class="card"><table><tr><th>Time</th><th>Run #</th><th>Grade</th><th>Blown</th>',
+         '<th>Track #</th><th>Type</th><th>Position on line</th><th>Speed (px/s)</th></tr>';
     foreach ($st as $r) {
+        $x = $r['x_on_line'] ?? null;
+        $sp = $r['speed_px_s'] ?? null;
         echo '<tr><td>' . e(local_dt($r['ts'])) . '</td><td>' . e($r['session_id'] ?? '-') . '</td>',
-             '<td>G' . (int)$r['grade'] . '</td><td>' . ($r['blown'] ? 'YES' : '-') . '</td></tr>';
+             '<td>G' . (int)$r['grade'] . '</td><td>' . ($r['blown'] ? 'YES' : '-') . '</td>',
+             '<td>' . e($r['track_id'] ?? '-') . '</td>',
+             '<td>' . e($r['crossing_type'] ?? '-') . '</td>',
+             '<td>' . ($x === null ? '-' : round(100 * (float)$x) . '%') . '</td>',
+             '<td>' . ($sp === null ? '-' : (string)round((float)$sp) ) . '</td></tr>';
     }
     echo '</table><div class="pager">';
     if ($page > 1) echo '<a href="?tab=log&' . $qs . '&page=' . ($page - 1) . '">&larr; Prev</a>';

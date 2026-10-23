@@ -13,6 +13,7 @@ page_head('Operate', 'operate', false);
         <div><b class="n" id="c3" style="color:var(--g3)">0</b><span>G3</span></div>
         <div><b class="n" id="c4" style="color:var(--g4)">0</b><span>G4</span></div>
         <div><b class="n" id="cb">0</b><span>Blown</span></div>
+        <div class="c-trkline" id="track-stats"></div>
       </div>
       <div id="belt-warn" class="warnstrip hidden"></div>
     </div>
@@ -46,6 +47,7 @@ page_head('Operate', 'operate', false);
           <button id="btn-clearline" class="danger">Clear line</button>
           <button id="btn-arm">ARM</button>
           <button id="btn-valve">Test valve</button>
+          <button id="btn-tracks">Tracks</button>
         </div>
         <div class="btnrow">
           <input type="text" id="batch" placeholder="Batch name (optional)" style="flex:1">

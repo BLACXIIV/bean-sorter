@@ -37,7 +37,11 @@ CREATE TABLE IF NOT EXISTS sort_log(
     ts TEXT DEFAULT CURRENT_TIMESTAMP,
     grade INTEGER,
     blown INTEGER,
-    session_id INTEGER
+    session_id INTEGER,
+    track_id INTEGER,
+    crossing_type TEXT,
+    x_on_line REAL,
+    speed_px_s REAL
 );
 CREATE TABLE IF NOT EXISTS run_sessions(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -48,7 +52,10 @@ CREATE TABLE IF NOT EXISTS run_sessions(
     g2 INTEGER DEFAULT 0,
     g3 INTEGER DEFAULT 0,
     g4 INTEGER DEFAULT 0,
-    blown INTEGER DEFAULT 0
+    blown INTEGER DEFAULT 0,
+    suppressed INTEGER DEFAULT 0,
+    estimated INTEGER DEFAULT 0,
+    lost INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_sortlog_ts ON sort_log(ts);
 CREATE TABLE IF NOT EXISTS belt_colors(
@@ -59,7 +66,7 @@ CREATE TABLE IF NOT EXISTS belt_colors(
 );
 """
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class DB:
@@ -87,6 +94,19 @@ class DB:
             cols = [r[1] for r in self.conn.execute("PRAGMA table_info(sort_log)")]
             if "session_id" not in cols:
                 self.conn.execute("ALTER TABLE sort_log ADD COLUMN session_id INTEGER")
+        if v < 4:
+            cols = [r[1] for r in self.conn.execute("PRAGMA table_info(sort_log)")]
+            for name, ddl in (("track_id", "track_id INTEGER"),
+                              ("crossing_type", "crossing_type TEXT"),
+                              ("x_on_line", "x_on_line REAL"),
+                              ("speed_px_s", "speed_px_s REAL")):
+                if name not in cols:
+                    self.conn.execute(f"ALTER TABLE sort_log ADD COLUMN {ddl}")
+            cols = [r[1] for r in self.conn.execute("PRAGMA table_info(run_sessions)")]
+            for name in ("suppressed", "estimated", "lost"):
+                if name not in cols:
+                    self.conn.execute(
+                        f"ALTER TABLE run_sessions ADD COLUMN {name} INTEGER DEFAULT 0")
         if v < SCHEMA_VERSION:
             self.conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         self.conn.execute(
@@ -216,16 +236,25 @@ class DB:
         self.conn.commit()
         return cur.lastrowid
 
-    def end_session(self, session_id):
+    def end_session(self, session_id, counters=None):
         self.conn.execute(
             "UPDATE run_sessions SET ended_at=CURRENT_TIMESTAMP WHERE id=?", (session_id,))
+        if counters:
+            self.conn.execute(
+                "UPDATE run_sessions SET suppressed=?, estimated=?, lost=? WHERE id=?",
+                (int(counters.get("suppressed", 0)),
+                 int(counters.get("estimated", 0)),
+                 int(counters.get("lost_before_line", 0)), session_id))
         self.conn.commit()
 
     # ---- operation log -------------------------------------------------------
-    def log_event(self, grade, blown, session_id=None):
+    def log_event(self, grade, blown, session_id=None, track_id=None,
+                  crossing_type=None, x_on_line=None, speed_px_s=None):
         self.conn.execute(
-            "INSERT INTO sort_log(grade, blown, session_id) VALUES(?,?,?)",
-            (grade, int(blown), session_id))
+            "INSERT INTO sort_log(grade, blown, session_id, track_id,"
+            " crossing_type, x_on_line, speed_px_s) VALUES(?,?,?,?,?,?,?)",
+            (grade, int(blown), session_id, track_id, crossing_type,
+             x_on_line, speed_px_s))
         if session_id is not None:
             g = int(grade) if grade in (1, 2, 3, 4) else 4
             self.conn.execute(

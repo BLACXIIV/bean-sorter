@@ -85,6 +85,8 @@ label{display:block;margin:8px 0 4px;color:var(--muted);font-size:14px}
 .cam-stats .n{font-size:19px;font-weight:700;font-variant-numeric:tabular-nums}
 .cam-stats span{display:block;color:var(--muted);font-size:11px;margin-top:-3px}
 .c1 .n{color:var(--g1)}.c2 .n{color:var(--g2)}.c3 .n{color:var(--g3)}.c4 .n{color:var(--g4)}
+.c-trkline{grid-column:1/-1;font-size:11px;color:var(--muted);
+  border-top:1px solid var(--line);padding:1px 4px;min-height:14px}
 
 /* ---------- grade accordion ---------- */
 .acc{border:1px solid var(--line);border-radius:8px;margin-bottom:6px;overflow:hidden}

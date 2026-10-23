@@ -144,7 +144,10 @@ def extract_palette(pix_bgr, k=None):
     if len(pix_bgr) < 20:
         return []
     if len(pix_bgr) > C.MAX_PIXELS:
-        pix_bgr = pix_bgr[_RNG.choice(len(pix_bgr), C.MAX_PIXELS, replace=False)]
+        # fresh generator per call: identical input -> identical subsample
+        # (a shared advancing _RNG made the same bean cluster differently)
+        pix_bgr = pix_bgr[np.random.default_rng(0).choice(
+            len(pix_bgr), C.MAX_PIXELS, replace=False)]
     lab = bgr_to_lab(pix_bgr)
     k = min(k, len(lab))
     crit = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 0.5)

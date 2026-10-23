@@ -158,10 +158,20 @@ class SimulatedCamera:
                                           dtype=np.int16) for _ in range(4)]
         self._noise_i = 0
         self.settings = None
+        # ground truth for tracking verification (sim only)
+        self._sort_line = None                  # object with .side((x,y))
+        self.spawned_total = 0
+        self.crossed_total = 0
+        self.crossed_defects = 0
 
     def set_scene(self, scene):
         self._scene = scene
         self._beans = []
+
+    def set_sort_line(self, line):
+        """Feed the engine's sorting line (anything with .side((x,y))) so the
+        sim can count beans that PHYSICALLY cross it. None disables."""
+        self._sort_line = line
 
     def _belt(self):
         if self._base is None:
@@ -187,7 +197,7 @@ class SimulatedCamera:
                     self._draw_bean(frame, x, y, g, self.BEAN_R)
         elif self._scene == "moving":
             self._step()
-            for x, y, g, r in self._beans:
+            for x, y, g, r, _side, _done in self._beans:
                 self._draw_bean(frame, x, y, g, r)
         # fixed noise pool: sim palette never overflows +/-8 (16..228), no clip needed
         self._noise_i = (self._noise_i + 1) % len(self._noise)
@@ -202,6 +212,14 @@ class SimulatedCamera:
     def _step(self):
         for b in self._beans:
             b[1] += self.SPEED
+            if self._sort_line is not None:
+                s = self._sort_line.side((b[0], b[1])) >= 0
+                if b[4] is not None and b[4] != s and not b[5]:
+                    b[5] = True                    # physically crossed, once
+                    self.crossed_total += 1
+                    if b[2] == 4:
+                        self.crossed_defects += 1
+                b[4] = s
         self._beans = [b for b in self._beans if b[1] < self._h + 60]
         tries = 0
         while len(self._beans) < self.MAX_BEANS and tries < 50:
@@ -213,7 +231,8 @@ class SimulatedCamera:
             if any(abs(b[0] - x) < 2 * self.BEAN_R + 20 and abs(b[1] - y) < 2 * self.BEAN_R + 20
                    for b in self._beans):
                 continue
-            self._beans.append([x, y, grade, r])
+            self._beans.append([x, y, grade, r, None, False])
+            self.spawned_total += 1
 
     def average(self, n=10):
         return _average(self.read, n)

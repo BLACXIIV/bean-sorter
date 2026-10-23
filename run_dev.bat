@@ -28,8 +28,8 @@ if "%READY%"=="0" (
     goto :stop
 )
 
-echo [dev] opening http://127.0.0.1:8080/ ...
-start "" http://127.0.0.1:8080/
+echo [dev] opening http://127.0.0.1:8080/operate.php ...
+start "" http://127.0.0.1:8080/operate.php
 echo.
 echo Dev servers running. Press any key or close this window to stop them.
 pause >nul

@@ -2,3 +2,6 @@
 flask>=3,<4
 opencv-python>=4.10,<5
 numpy>=2.1,<3
+# dev-only test tooling - NOT needed on the Pi (offline, see install.sh):
+playwright>=1.40      # tests/test_ui_click_mapping.py (also: playwright install chromium)
+vermin>=1.5           # Python 3.11 compatibility audit (Pi runs 3.11/3.13)

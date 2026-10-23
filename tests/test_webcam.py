@@ -2,12 +2,13 @@
 """WebcamCamera unit tests - cv2.VideoCapture is mocked, no hardware needed."""
 import sys
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import cv2
 import numpy as np
 
-sys.path.insert(0, "..")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config as C
 from hardware import WebcamCamera
 

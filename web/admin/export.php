@@ -36,7 +36,7 @@ function hex_cell($sheet, string $cell, string $hex): void {
 }
 
 function write_runs($sheet, array $rows): void {
-    $head = ['Run #', 'Batch', 'Start', 'End', 'Duration', 'Total', 'G1', 'G2', 'G3', 'G4', 'Defect %', 'Blown'];
+    $head = ['Run #', 'Batch', 'Start', 'End', 'Duration', 'Total', 'G1', 'G2', 'G3', 'G4', 'Defect %', 'Blown', 'Suppressed', 'Estimated', 'Lost'];
     $sheet->fromArray($head, null, 'A1');
     $r = 2;
     foreach ($rows as $x) {
@@ -46,6 +46,7 @@ function write_runs($sheet, array $rows): void {
             duration_s($x['started_at'], $x['ended_at']), $t,
             (int)$x['g1'], (int)$x['g2'], (int)$x['g3'], (int)$x['g4'],
             $t ? round(100 * $x['g4'] / $t, 1) : 0, (int)$x['blown'],
+            (int)($x['suppressed'] ?? 0), (int)($x['estimated'] ?? 0), (int)($x['lost'] ?? 0),
         ], null, 'A' . $r++);
     }
     sheet_style($sheet, count($head));
@@ -104,11 +105,15 @@ function write_belt($sheet, array $rows): void {
 }
 
 function write_log($sheet, array $rows): void {
-    $head = ['Time', 'Run #', 'Grade', 'Blown'];
+    $head = ['Time', 'Run #', 'Grade', 'Blown', 'Track #', 'Type', 'Position on line', 'Speed (px/s)'];
     $sheet->fromArray($head, null, 'A1');
     $r = 2;
     foreach ($rows as $x) {
-        $sheet->fromArray([local_dt($x['ts']), $x['session_id'], (int)$x['grade'], (int)$x['blown']],
+        $x_on = $x['x_on_line'] ?? null;
+        $sheet->fromArray([local_dt($x['ts']), $x['session_id'], (int)$x['grade'], (int)$x['blown'],
+            $x['track_id'], $x['crossing_type'],
+            $x_on === null ? null : round(100 * (float)$x_on, 1),
+            $x['speed_px_s'] === null ? null : round((float)$x['speed_px_s'], 1)],
             null, 'A' . $r++);
     }
     sheet_style($sheet, count($head));

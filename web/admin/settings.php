@@ -15,6 +15,10 @@ $TUNABLES = [
     'DEFECT_VOTE_RATIO'  => [0.1, 0.9, 0.05, 0.3],
     'BELT_TOLERANCE'     => [5, 50, 0.5, 18.0],
     'BELT_L_WEIGHT'      => [0.1, 1.0, 0.05, 0.5],
+    'TRACK_MAX_COAST_S'  => [0.1, 3.0, 0.05, 0.6],
+    'TRACK_REID_DE'      => [3, 40, 0.5, 12.0],
+    'DEDUPE_RADIUS_PX'   => [5, 100, 1, 25],
+    'DEDUPE_WINDOW_S'    => [0.02, 1.0, 0.01, 0.15],
 ];
 
 $msg = ''; $err = '';
