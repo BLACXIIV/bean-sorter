@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS samples(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     grade INTEGER NOT NULL CHECK(grade BETWEEN 1 AND 4),
     x INTEGER, y INTEGER, area REAL,
+    source TEXT DEFAULT 'bean',
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS grade_colors(
@@ -55,7 +56,8 @@ CREATE TABLE IF NOT EXISTS run_sessions(
     blown INTEGER DEFAULT 0,
     suppressed INTEGER DEFAULT 0,
     estimated INTEGER DEFAULT 0,
-    lost INTEGER DEFAULT 0
+    lost INTEGER DEFAULT 0,
+    vote_resets INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_sortlog_ts ON sort_log(ts);
 CREATE TABLE IF NOT EXISTS belt_colors(
@@ -66,7 +68,7 @@ CREATE TABLE IF NOT EXISTS belt_colors(
 );
 """
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
 
 
 class DB:
@@ -107,6 +109,17 @@ class DB:
                 if name not in cols:
                     self.conn.execute(
                         f"ALTER TABLE run_sessions ADD COLUMN {name} INTEGER DEFAULT 0")
+        if v < 5:
+            cols = [r[1] for r in self.conn.execute("PRAGMA table_info(samples)")]
+            if "source" not in cols:
+                self.conn.execute(
+                    "ALTER TABLE samples ADD COLUMN source TEXT DEFAULT 'bean'")
+        if v < 6:
+            cols = [r[1] for r in self.conn.execute("PRAGMA table_info(run_sessions)")]
+            if "vote_resets" not in cols:
+                self.conn.execute(
+                    "ALTER TABLE run_sessions ADD COLUMN "
+                    "vote_resets INTEGER DEFAULT 0")
         if v < SCHEMA_VERSION:
             self.conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         self.conn.execute(
@@ -141,9 +154,10 @@ class DB:
         return cv2.imdecode(np.frombuffer(r[0], np.uint8), cv2.IMREAD_COLOR)
 
     # ---- colour samples ------------------------------------------------------
-    def add_sample(self, grade, x, y, area, palette):
+    def add_sample(self, grade, x, y, area, palette, source="bean"):
         cur = self.conn.execute(
-            "INSERT INTO samples(grade,x,y,area) VALUES(?,?,?,?)", (grade, x, y, area))
+            "INSERT INTO samples(grade,x,y,area,source) VALUES(?,?,?,?,?)",
+            (grade, x, y, area, source))
         sid = cur.lastrowid
         self.conn.executemany(
             "INSERT INTO grade_colors(sample_id,grade,hex,L,a,b,weight) VALUES(?,?,?,?,?,?,?)",
@@ -241,10 +255,12 @@ class DB:
             "UPDATE run_sessions SET ended_at=CURRENT_TIMESTAMP WHERE id=?", (session_id,))
         if counters:
             self.conn.execute(
-                "UPDATE run_sessions SET suppressed=?, estimated=?, lost=? WHERE id=?",
+                "UPDATE run_sessions SET suppressed=?, estimated=?, lost=?,"
+                " vote_resets=? WHERE id=?",
                 (int(counters.get("suppressed", 0)),
                  int(counters.get("estimated", 0)),
-                 int(counters.get("lost_before_line", 0)), session_id))
+                 int(counters.get("lost_before_line", 0)),
+                 int(counters.get("vote_resets", 0)), session_id))
         self.conn.commit()
 
     # ---- operation log -------------------------------------------------------

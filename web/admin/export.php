@@ -36,7 +36,7 @@ function hex_cell($sheet, string $cell, string $hex): void {
 }
 
 function write_runs($sheet, array $rows): void {
-    $head = ['Run #', 'Batch', 'Start', 'End', 'Duration', 'Total', 'G1', 'G2', 'G3', 'G4', 'Defect %', 'Blown', 'Suppressed', 'Estimated', 'Lost'];
+    $head = ['Run #', 'Batch', 'Start', 'End', 'Duration', 'Total', 'G1', 'G2', 'G3', 'G4', 'Defect %', 'Blown', 'Suppressed', 'Estimated', 'Lost', 'Vote resets'];
     $sheet->fromArray($head, null, 'A1');
     $r = 2;
     foreach ($rows as $x) {
@@ -47,6 +47,7 @@ function write_runs($sheet, array $rows): void {
             (int)$x['g1'], (int)$x['g2'], (int)$x['g3'], (int)$x['g4'],
             $t ? round(100 * $x['g4'] / $t, 1) : 0, (int)$x['blown'],
             (int)($x['suppressed'] ?? 0), (int)($x['estimated'] ?? 0), (int)($x['lost'] ?? 0),
+            (int)($x['vote_resets'] ?? 0),
         ], null, 'A' . $r++);
     }
     sheet_style($sheet, count($head));

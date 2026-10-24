@@ -1,4 +1,6 @@
 """Camera Module 3 (Picamera2) / PC webcam, and solenoid valve (gpiozero + lgpio on Pi 5)."""
+import math
+import os
 import sys
 import threading
 import time
@@ -146,6 +148,7 @@ class SimulatedCamera:
     BEAN_R = 40
     SPEED = 25
     MAX_BEANS = 8
+    SIM_DT = 1.0 / 20.0                           # fixed sim-time step/frame
 
     def __init__(self, saved_settings=None):
         self._w, self._h = C.FRAME_SIZE
@@ -163,6 +166,32 @@ class SimulatedCamera:
         self.spawned_total = 0
         self.crossed_total = 0
         self.crossed_defects = 0
+        self.active_count = 0
+        # per-physical-bean truth: id -> {id, grade, crossed, cross_t,
+        #   cross_f, frames_visible, x_at_line}; valve fires attribute to
+        #   the live bean nearest the line (see SimulatedValve).
+        self.bean_truth = {}
+        self._next_bid = 1
+        self._frame_i = 0
+        # BEAN_SIM_SCHEDULE=1: spawns follow a fixed schedule on SIMULATED time
+        # (frame index * SIM_DT), identical no matter how fast the loop runs,
+        # so paired tracker runs see the same bean sequence. BEAN_SIM_SECS
+        # stops spawning after that much sim time (drain follows);
+        # BEAN_SIM_SPEED overrides belt speed in px/s (default 500 = 25px/fr);
+        # BEAN_SIM_SEED changes the spawn RNG (paired runs keep the same seed).
+        self._sched_on = bool(os.environ.get("BEAN_SIM_SCHEDULE"))
+        self._sim_dt = float(os.environ.get("BEAN_SIM_DT") or self.SIM_DT)
+        self._sim_t = 0.0
+        self.sim_t = None                  # current sim seconds (sched only)
+        self._next_spawn = 0.0
+        self._spawn_until = float(os.environ.get("BEAN_SIM_SECS") or 0.0)
+        self._speed_pxs = float(os.environ.get("BEAN_SIM_SPEED") or 0.0) \
+            or self.SPEED / self._sim_dt        # default 25 px/frame
+        self.step_px = self._speed_pxs * self._sim_dt \
+            if self._sched_on else self.SPEED   # per-frame bean travel
+        seed = os.environ.get("BEAN_SIM_SEED")
+        if seed is not None:
+            self._rng = np.random.default_rng(int(seed))
 
     def set_scene(self, scene):
         self._scene = scene
@@ -178,12 +207,14 @@ class SimulatedCamera:
             self._base = np.tile(np.array(self.BELT_BGR, np.uint8),
                                  (self._h, self._w, 1))
         if self._scene == "moving":
-            self._seam_y = [(y + self.SPEED) % self._h for y in self._seam_y]
+            step = self._speed_pxs * self._sim_dt if self._sched_on else self.SPEED
+            self._seam_y = [(y + step) % self._h for y in self._seam_y]
         frame = self._base.copy()
         for y, dark in zip(self._seam_y, self.SEAM_DARKER):
             bgr = tuple(max(0, c - dark) for c in self.BELT_BGR)
-            cv2.rectangle(frame, (0, y - self.SEAM_T // 2),
-                          (self._w, y + self.SEAM_T // 2), bgr, -1)
+            iy = int(round(y))              # seams can be float in sched mode
+            cv2.rectangle(frame, (0, iy - self.SEAM_T // 2),
+                          (self._w, iy + self.SEAM_T // 2), bgr, -1)
         return frame
 
     def read(self):
@@ -197,10 +228,13 @@ class SimulatedCamera:
                     self._draw_bean(frame, x, y, g, self.BEAN_R)
         elif self._scene == "moving":
             self._step()
-            for x, y, g, r, _side, _done in self._beans:
-                self._draw_bean(frame, x, y, g, r)
+            for b in self._beans:
+                self._draw_bean(frame, b[0], b[1], b[2], b[3])
         # fixed noise pool: sim palette never overflows +/-8 (16..228), no clip needed
-        self._noise_i = (self._noise_i + 1) % len(self._noise)
+        # schedule mode indexes noise by FRAME so paired runs are pixel-
+        # identical; otherwise the index drifts with real-time pre-run reads.
+        self._noise_i = (self._frame_i if self._sched_on
+                         else self._noise_i + 1) % len(self._noise)
         return (frame.astype(np.int16) + self._noise[self._noise_i]).astype(np.uint8)
 
     def _draw_bean(self, frame, x, y, grade, r):
@@ -210,12 +244,26 @@ class SimulatedCamera:
             cv2.circle(frame, (x + r // 3, y - r // 3), r // 3, self.PATCH_BGR, -1, cv2.LINE_AA)
 
     def _step(self):
+        if self._sched_on:
+            self._sim_t += self._sim_dt
+            self.sim_t = self._sim_t
+        self._frame_i += 1
+        step = self._speed_pxs * self._sim_dt if self._sched_on else self.SPEED
         for b in self._beans:
-            b[1] += self.SPEED
+            b[1] += step
+            if not b[5] and b[1] + b[3] > 0:
+                b[7] += 1                    # visible frame, not yet crossed
             if self._sort_line is not None:
                 s = self._sort_line.side((b[0], b[1])) >= 0
                 if b[4] is not None and b[4] != s and not b[5]:
                     b[5] = True                    # physically crossed, once
+                    b[8] = self._sim_t if self._sched_on else self._frame_i
+                    truth = self.bean_truth[b[6]]
+                    truth["crossed"] = True
+                    truth["cross_t"] = b[8]
+                    truth["cross_f"] = self._frame_i
+                    truth["x_at_line"] = b[0]
+                    truth["frames_visible"] = b[7]
                     self.crossed_total += 1
                     if b[2] == 4:
                         self.crossed_defects += 1
@@ -223,6 +271,9 @@ class SimulatedCamera:
         self._beans = [b for b in self._beans if b[1] < self._h + 60]
         tries = 0
         while len(self._beans) < self.MAX_BEANS and tries < 50:
+            if self._sched_on and (self._sim_t >= self._spawn_until
+                                   or self._sim_t < self._next_spawn):
+                break                            # fixed schedule: not yet/never
             tries += 1
             x = float(self._rng.integers(80, self._w - 80))
             y = float(-self.BEAN_R - self._rng.integers(0, 400))
@@ -231,8 +282,54 @@ class SimulatedCamera:
             if any(abs(b[0] - x) < 2 * self.BEAN_R + 20 and abs(b[1] - y) < 2 * self.BEAN_R + 20
                    for b in self._beans):
                 continue
-            self._beans.append([x, y, grade, r, None, False])
+            bid = self._next_bid
+            self._next_bid += 1
+            self._beans.append([x, y, grade, r, None, False, bid, 0, None])
+            self.bean_truth[bid] = {"id": bid, "grade": grade, "r": r,
+                                    "x_spawn": x, "y_spawn": y,
+                                    "spawn_f": self._frame_i,
+                                    "crossed": False, "cross_t": None,
+                                    "cross_f": None, "x_at_line": None,
+                                    "frames_visible": 0}
             self.spawned_total += 1
+            if self._sched_on:
+                # one bean per scheduled slot; next slot on sim time
+                self._next_spawn = self._sim_t + float(self._rng.uniform(0.3, 0.8))
+                break
+        self.active_count = len(self._beans)
+
+    def nearest_to_line(self, t_c=None, x_on_line=None):
+        """Which physical bean a valve fire is for. With a crossing anchor
+        (t_c = the tracker's crossing time, x_on_line = where on the line):
+        the bean whose PHYSICAL crossing is closest in time, x tie-broken.
+        Without an anchor: the live bean nearest the line right now.
+        Returns a copy of its truth record + dist/score."""
+        if self._sort_line is None:
+            return None
+        if t_c is not None:
+            crossed = [b for b in self.bean_truth.values() if b["crossed"]]
+            if not crossed:
+                return None
+            def score(b):
+                dx = abs((b["x_at_line"] or 0) - (x_on_line or 0))
+                return abs(b["cross_t"] - t_c) + dx / 1000.0
+            best = min(crossed, key=score)
+            rec = dict(best)
+            rec["dist_px"] = score(best)
+            return rec
+        if not self._beans:
+            return None
+        ln = math.sqrt(self._sort_line.len2)
+        best, best_d = None, 1e18
+        for b in self._beans:
+            d = abs(self._sort_line.side((b[0], b[1]))) / ln
+            if d < best_d:
+                best, best_d = b, d
+        if best is None:
+            return None
+        rec = dict(self.bean_truth.get(best[6], {}))
+        rec["dist_px"] = best_d
+        return rec
 
     def average(self, n=10):
         return _average(self.read, n)
@@ -248,7 +345,8 @@ class Valve:
                                 initial_value=False)
         self._lock = threading.Lock()
 
-    def pulse(self, delay=None, duration=None):
+    def pulse(self, delay=None, duration=None, uncertain=False,
+              t_c=None, x_on_line=None):
         """Non-blocking: opens the valve after `delay`, for `duration` seconds."""
         delay = C.VALVE_DELAY_S if delay is None else delay
         duration = C.VALVE_PULSE_S if duration is None else duration
@@ -273,9 +371,25 @@ class Valve:
 
 
 class SimulatedValve:
-    def pulse(self, delay=None, duration=None):
+    """No hardware. When .ground is set to a SimulatedCamera, every pulse is
+    recorded and attributed to the physical bean nearest the line at that
+    instant -> fires = [{t, bean_id, grade, dist_px, uncertain}]."""
+    def __init__(self):
+        self.ground = None                  # SimulatedCamera or None
+        self.fires = []
+
+    def pulse(self, delay=None, duration=None, uncertain=False,
+              t_c=None, x_on_line=None):
         delay = C.VALVE_DELAY_S if delay is None else delay
         duration = C.VALVE_PULSE_S if duration is None else duration
+        bean = (self.ground.nearest_to_line(t_c, x_on_line)
+                if self.ground is not None else None)
+        t = getattr(self.ground, "sim_t", None)
+        self.fires.append({"t": t, "t_c": t_c, "x_on_line": x_on_line,
+                           "bean_id": bean and bean.get("id"),
+                           "grade": bean and bean.get("grade"),
+                           "dist_px": bean and bean.get("dist_px"),
+                           "uncertain": bool(uncertain)})
         print(f"[valve:simulated] BLOW (delay={delay}, duration={duration})")
 
     def close(self):

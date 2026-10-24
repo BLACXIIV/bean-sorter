@@ -32,7 +32,7 @@ if ($tab === 'runs') {
     $rows = run_rows($db, $from, $to, $run);
     echo '<div class="card"><table><tr><th>Run #</th><th>Batch</th><th>Start</th><th>End</th>',
          '<th>Duration</th><th>Total</th><th>G1</th><th>G2</th><th>G3</th><th>G4</th><th>Defect %</th><th>Blown</th>',
-         '<th>Suppressed</th><th>Estimated</th><th>Lost</th></tr>';
+         '<th>Suppressed</th><th>Estimated</th><th>Lost</th><th>Vote resets</th></tr>';
     foreach ($rows as $r) {
         $t = $r['g1'] + $r['g2'] + $r['g3'] + $r['g4'];
         echo '<tr><td>#' . (int)$r['id'] . '</td><td>' . e($r['batch_name']) . '</td>',
@@ -43,7 +43,8 @@ if ($tab === 'runs') {
              '<td>' . (int)$r['blown'] . '</td>',
              '<td>' . (int)($r['suppressed'] ?? 0) . '</td>',
              '<td>' . (int)($r['estimated'] ?? 0) . '</td>',
-             '<td>' . (int)($r['lost'] ?? 0) . '</td></tr>';
+             '<td>' . (int)($r['lost'] ?? 0) . '</td>',
+             '<td>' . (int)($r['vote_resets'] ?? 0) . '</td></tr>';
     }
     echo '</table></div>';
 } elseif ($tab === 'daily') {

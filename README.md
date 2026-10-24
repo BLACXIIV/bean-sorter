@@ -2,6 +2,8 @@
 
 Python + SQLite. Grades 1–3 pass, grade 4 (defect) is blown out by a solenoid air valve.
 
+**Step-by-step runbook for both platforms: [HOW-TO-RUN.md](HOW-TO-RUN.md)**
+
 ## 1. Hardware
 
 | Part | Connection |
@@ -63,8 +65,11 @@ webcam indices 0-4, `--port N`.
 
 `run_dev.bat` (Windows) / `run_dev.sh` (Linux/macOS): sets `BEAN_DB=data/dev.db`
 (**separate database** – webcam colours are not valid for the Pi camera, never mix
-them), starts `engine.py --camera webcam --valve sim` and `php -S 127.0.0.1:8080 -t web`,
-opens the browser, and stops both when the window closes. Deps:
+them), asks which camera to use (laptop webcam / Pi Camera Module 3 / external USB
+index / simulated), starts `engine.py --camera <pick> --valve sim` and
+`php -S 127.0.0.1:8080 -t web`, opens the browser at operate.php, and stops
+everything (and closes the app window) on Ctrl+C or Enter. Pass a camera source to
+skip the menu: `run_dev.bat webcam:1`, `run_dev.bat sim`, `run_dev.bat pi`. Deps:
 `pip install -r requirements-dev.txt` (flask, opencv, numpy) + PHP CLI with sqlite3.
 
 Webcam auto white balance / exposure can drift – webcam colours are for **UI/flow
@@ -75,10 +80,12 @@ testing only**; always recalibrate on the Pi.
 ```powershell
 pip install -r requirements-dev.txt
 playwright install chromium        # only for tests/test_ui_click_mapping.py
-python scripts/check.py            # py_compile + php -l + all tests/test_*.py
+python scripts/check.py            # py_compile + php -l + all tests/test_*.py (--strict: any SKIPPED = fail)
 python scripts/smoke.py            # clean boot: engine health, calib click, operate.php
-python scripts/simrun.py 120       # calibrated sim run + ground-truth assert
-python scripts/a3_matrix.py        # 120s x {clean, 10% drop, 10% drop @8fps} x {traj, legacy}
+python scripts/simrun.py 120       # calibrated sim run: drains the sim, then asserts tracker counts == ground truth
+python scripts/a3_matrix.py        # paired schedule, 5 seeds x {drop10, medium 45px/f, harsh 90px/f} @8fps x {traj, legacy}
+python scripts/diagnose_missed.py  # per-frame evidence for every missed grade-4 bean (NMS, votes, binds)
+python scripts/miss_detail.py var/a3_x.jsonl var/a3_x_status.json  # per-missed-defect evidence + ghost classification
 python tests/test_ui_click_mapping.py   # needs php CLI + playwright
 python -m vermin --target=3.11- .  # Python 3.11 compatibility audit
 ```
@@ -118,11 +125,23 @@ python3 main.py status            # see stored hex colours per grade
   (and blown, if grade 4) exactly once - even through detection dropouts (`TRACK_MAX_COAST_S`), brief occlusion,
   low frame rates, or beans vibrating on the line. `FEATURES["trajectory_tracking"] = False` restores the old
   nearest-neighbour tracker (`LegacyTracker`).
-- Tunables (seconds and pixels, frame-rate independent; the four marked * are editable in admin → Settings):
+- Tunables (seconds and pixels, frame-rate independent; the marked * are editable in admin → Settings):
   `TRACK_MIN_HITS`, `TRACK_MAX_COAST_S`*, `TRACK_GATE_MIN_PX`, `TRACK_GATE_SPEED_FACTOR`,
   `TRACK_REID_WINDOW_S`, `TRACK_REID_DE`*, `TRACK_AREA_RATIO`, `TRACK_MIN_SPACING_FACTOR`,
-  `DEDUPE_RADIUS_PX`*, `DEDUPE_WINDOW_S`*, `TRAIL_LEN`, `TRACK_HUNGARIAN_MAX`
-  (greedy-by-cost association above this many tracks/detections, default 40).
+  `DEDUPE_RADIUS_PX`*, `DEDUPE_WINDOW_S`*, `TRAIL_LEN`, `TRACK_HUNGARIAN_MAX`,
+  `TRACK_MIN_VOTES`* (non-suspect votes below this at the line = "uncertain", default 2),
+  `UNCERTAIN_POLICY`* = `"blow"` (default: fail-safe, uncertain beans actuate the valve - costs some good beans)
+  or `"pass"` (uncertain beans count but never fire). Uncertain crossings are stored with
+  `crossing_type="uncertain"` and counted in `/api/status` → `tracking.uncertain`.
+- Vote resets: when a coasting/re-identified track binds a detection whose palette is far
+  from the track mean AND far from every palette the track has shown, its votes restart
+  (a genuinely different bean). Each reset is counted in `tracking.vote_resets` and in the
+  run summary (`run_sessions.vote_resets`, schema v6, shown in Admin → Reports).
+- Calibration patch fallback: tapping empty belt in grade mode still returns
+  `NO_BEAN_AT_POINT`, but a tap where no bean outline is found MAY save a guarded patch
+  sample (uniform, not belt-like, differs from background). It returns `source:"patch"`,
+  persists `samples.source="patch"` (schema v5) and shows a `patch` badge in the grade
+  lists.
 - Duplicate suppression is fail-safe: it can only drop a weakly-established track
   (tentative / re-identified / estimated / <5 hits) that matches a recent crossing in
   position, a speed-aware time window AND palette dE - a real bean is never suppressed.
@@ -133,8 +152,15 @@ python3 main.py status            # see stored hex colours per grade
   suppressed/estimated/lost and per-track summaries. Off by default.
 - Verification hooks (dev only): `BEAN_DROP=0.1` randomly drops detections before the tracker,
   `BEAN_LEGACY=1` forces the legacy tracker; SimulatedCamera counts physical line crossings
-  (`/api/status` -> `ground_truth`), and `scripts/simrun.py <seconds>` runs a calibrated sim and
-  asserts tracked crossings == physical crossings, blown == physical defects.
+  (`/api/status` -> `ground_truth`), and `scripts/simrun.py <seconds>` runs a calibrated sim,
+  drains until the frame is empty, then asserts tracked crossings == physical crossings and
+  blown == physical defects. `BEAN_SIM_SCHEDULE=1` (+ `BEAN_SIM_SECS`, `BEAN_SIM_SPEED` px/s,
+  `BEAN_SIM_DT` frame dt, `BEAN_SIM_SEED`) makes the sim spawn beans on a fixed frame-indexed
+  schedule with sim time fed to the tracker - identical bean sequences for paired
+  legacy/trajectory comparisons (scripts/a3_matrix.py). Per physical bean the sim records
+  id/grade/crossed/cross_t/frames_visible, and every valve pulse is attributed to the bean
+  nearest the line at fire time (`ground_truth.fires[]`), so a run reports
+  defects blown/missed, false blows on good beans and uncertain blows (`simrun` ATTR line).
 - Defects missed → lower `DEFECT_BIAS` (e.g. 0.7) or calibrate more grade 4 samples.
   Good beans blown → raise `DEFECT_BIAS` (e.g. 1.0) or add more grade 1–3 samples.
 - `UNKNOWN_DE`: anything further than this from *every* grade (stones, husks…) is treated as grade 4.
@@ -149,11 +175,11 @@ python3 main.py status            # see stored hex colours per grade
 `speed_px_s`) · `run_sessions` (per run, incl. `suppressed`, `estimated`, `lost` counters).
 
 ## 6. Known limits
-- **Beans that touch each other are detected as ONE blob** (measured: S17, 20% of
-  beans travelling touching at 1.8–2.1× bean area → trajectory undercount 3/30 and
-  one grade-4 bean not blown; tests mark this XFAIL). A merged blob also fails
-  `TRACK_AREA_RATIO` re-id. Use a vibrating feeder / single-file chute — this is a
-  segmentation limit, not fixable by tracking.
+- **Beans that touch each other are detected as ONE blob** (measured: S17 x20 seeds,
+  20% of beans travelling touching at 1.8–2.1× bean area → trajectory counts
+  27..27/30, legacy 30..30/30 only by ghost-splitting the merged blob; XFAIL).
+  A merged blob also fails `TRACK_AREA_RATIO` re-id. Use a vibrating feeder /
+  single-file chute — this is a segmentation limit, not fixable by tracking.
 - Beans that overlap in the same lane for many frames (impossible physically, but
   the S15-overlap stress case) merge into one detection → undercount
   (measured: 30–32 counted of 32 over 20 seeds, XFAIL).

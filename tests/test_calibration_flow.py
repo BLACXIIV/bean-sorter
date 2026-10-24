@@ -18,6 +18,7 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))        # in-process unit checks import app modules
 results = []
 
 
@@ -84,17 +85,19 @@ def main():
                    f"code={r.get('code')}")
             assert post(base, "/api/mode", {"mode": "calibrate"}).get("ok")
 
+            # fresh DB: no belt colours, no background -> no detection source
+            post(base, "/api/calibrate/select", {"target": 1})
+            r = post(base, "/api/calibrate/click", {"nx": 0.5, "ny": 0.5})
+            report("grade tap, no source -> code NO_SEGMENTATION_SOURCE",
+                   not r.get("ok") and r.get("code") == "NO_SEGMENTATION_SOURCE",
+                   f"code={r.get('code')}")
+
             r = post(base, "/api/calibrate/click", {"nx": "x"})
             report("malformed tap -> code BAD_REQUEST",
                    not r.get("ok") and r.get("code") == "BAD_REQUEST",
                    f"code={r.get('code')}")
 
-            for code, why in (
-                    ("NO_BEAN_AT_POINT", "patch fallback always succeeds in sim"),
-                    ("NO_SEGMENTATION_SOURCE", "patch fallback succeeds"),
-                    ("PATCH_OK?TOO_FEW_PIXELS", "sim beans always have pixels"),
-                    ("BELT_LIMIT", "needs BELT_MAX_COLORS distinct belt spots"),
-                    ("CAMERA_ERROR", "sim camera never fails")):
+            for code, why in (("CAMERA_ERROR", "sim camera never fails"),):
                 skipped(f"error code {code}", why)
 
             # ---- real calibration flow
@@ -112,6 +115,24 @@ def main():
             r = post(base, "/api/calibrate/background", {})
             report("background captured", r.get("ok") is True)
             time.sleep(0.3)
+
+            # grade tap on empty belt in the static scene -> no bean there,
+            # patch guard rejects it (uniform but belt-like) -> NO_BEAN_AT_POINT
+            # and NOTHING may be saved.
+            con = sqlite3.connect(str(db_path))
+            before = con.execute("SELECT COUNT(*) FROM samples").fetchone()[0]
+            con.close()
+            post(base, "/api/calibrate/select", {"target": 1})
+            r = post(base, "/api/calibrate/click",
+                     {"nx": 0.5, "ny": 0.97})   # bottom edge: belt only
+            report("grade tap on empty belt -> code NO_BEAN_AT_POINT",
+                   not r.get("ok") and r.get("code") == "NO_BEAN_AT_POINT",
+                   f"code={r.get('code')} err={r.get('error', '')[:60]}")
+            con = sqlite3.connect(str(db_path))
+            after = con.execute("SELECT COUNT(*) FROM samples").fetchone()[0]
+            con.close()
+            report("empty-belt tap saved NOTHING",
+                   after == before, f"samples {before} -> {after}")
 
             # belt target + tap straddling a bean edge in the static grid:
             # half dark bean / half blue belt = non-uniform patch
@@ -154,6 +175,79 @@ def main():
             report("blown == grade-4 counted (defects only)",
                    c["blown"] == c["g4"] and c["blown"] > 0,
                    f"blown={c['blown']} g4={c['g4']}")
+
+            # ---- unit-level error paths (prepared input, in-process)
+            import numpy as np
+            from types import SimpleNamespace
+            import config as C
+            import db as DB_mod
+            import engine as EN
+            import sorter as SO
+            import vision as VI
+
+            # BELT_LIMIT: belt_colors already at BELT_MAX_COLORS
+            db2 = DB_mod.DB(Path(td) / "beltlimit.db")
+            lab0 = np.array([50.0, 0.0, 0.0], np.float32)
+            for i in range(int(C.BELT_MAX_COLORS)):
+                db2.add_belt_color(lab0 + i * 10.0, f"#0000{i:02X}")
+            EN.E = SimpleNamespace(
+                db=db2, belt=None, undo_stack=[], message="",
+                _load_belt=lambda: None, _warnings=lambda: [])
+            frame = np.tile(np.array([150, 110, 60], np.uint8), (720, 1280, 1))
+            e_code, _resp = EN._belt_click(frame, (640, 360))
+            report("unit BELT_LIMIT at BELT_MAX_COLORS colours",
+                   e_code is not None and e_code[0] == "BELT_LIMIT",
+                   f"code={e_code}")
+
+            # TOO_FEW_PIXELS: real bean found, but palette extraction returns
+            # nothing (extract_palette floors at 20 px; real frames always
+            # exceed it since MIN_BEAN_AREA=400, so the degenerate case is
+            # injected by stubbing extract_palette for this call only).
+            bg = np.zeros((720, 1280, 3), np.uint8)
+            fb = bg.copy()
+            import cv2
+            cv2.circle(fb, (640, 360), 34, (90, 90, 90), -1)
+            orig_ep = VI.extract_palette
+            VI.extract_palette = lambda pix, k=None: []
+            try:
+                res = SO.calibrate_click(db2, fb, bg, (640, 360), 4)
+            finally:
+                VI.extract_palette = orig_ep
+            report("unit TOO_FEW_PIXELS ('too small' error string)",
+                   isinstance(res, str) and "too small" in res,
+                   f"res={res!r}")
+
+            # Guarded patch fallback: a bean segmentation misses (area gate
+            # raised so bean_at finds no outline) but whose centre patch is
+            # uniform and far from the belt -> saved with source='patch'.
+            db3 = DB_mod.DB(Path(td) / "patch.db")
+            belt_lab = VI.bgr_to_lab(np.array([[150, 110, 60]], np.uint8))
+            belt2 = VI.BeltModel(belt_lab)
+            db3.add_belt_color(belt_lab[0], "#966E3C")
+            EN.E = SimpleNamespace(
+                db=db3, belt=belt2, bg=None, undo_stack=[], message="",
+                _warnings=lambda: [])
+            f2 = np.tile(np.array([150, 110, 60], np.uint8), (720, 1280, 1))
+            cv2.circle(f2, (640, 360), 30, (40, 60, 200), -1)   # dark red bean
+            orig_area = C.MIN_BEAN_AREA
+            C.MIN_BEAN_AREA = 10 ** 9      # segmentation misses every outline
+            try:
+                res = SO.calibrate_click(db3, f2, None, (640, 360), 2, belt2)
+                pal = EN._patch_click(f2, (640, 360), 2)
+            finally:
+                C.MIN_BEAN_AREA = orig_area
+            row = db3.conn.execute(
+                "SELECT grade, source FROM samples").fetchall()
+            report("unit patch fallback: missed bean saved source='patch'",
+                   isinstance(res, str) and res.startswith("No bean detected")
+                   and pal is not None and row == [(2, "patch")],
+                   f"res={res!r} rows={row}")
+            # guard (b): a uniform belt patch is still rejected -> no save
+            pal2 = EN._patch_click(f2, (60, 60), 2)
+            row2 = db3.conn.execute("SELECT COUNT(*) FROM samples").fetchone()[0]
+            report("unit patch fallback: belt-like patch rejected",
+                   pal2 is None and row2 == 1,
+                   f"pal={pal2} samples={row2}")
             return 0 if all(results) else 1
         finally:
             proc.terminate()

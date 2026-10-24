@@ -29,7 +29,7 @@ $beltRows = $db->query(
     'SELECT id, hex, L, a, b, created_at FROM belt_colors ORDER BY id'
 )->fetchAll();
 $rows = $db->query(
-    'SELECT s.id sid, s.grade, s.created_at, gc.hex, gc.L, gc.a, gc.b, gc.weight
+    'SELECT s.id sid, s.grade, s.created_at, s.source, gc.hex, gc.L, gc.a, gc.b, gc.weight
      FROM samples s JOIN grade_colors gc ON gc.sample_id = s.id
      ORDER BY s.grade, s.id, gc.id'
 )->fetchAll();
@@ -83,7 +83,8 @@ foreach ([1, 2, 3, 4] as $g) {
         echo '<tr><td><span class="swatch" style="background:' . e($r['hex']) . '"></span></td>',
              '<td class="mono">' . e($r['hex']) . '</td><td>' . round($r['L'], 1) . '</td>',
              '<td>' . round($r['a'], 1) . '</td><td>' . round($r['b'], 1) . '</td>',
-             '<td>' . round($r['weight'] * 100) . '%</td><td>#' . (int)$r['sid'] . '</td>',
+             '<td>' . round($r['weight'] * 100) . '%</td><td>#' . (int)$r['sid'] .
+             (($r['source'] ?? 'bean') === 'patch' ? ' <span class="chip">patch</span>' : '') . '</td>',
              '<td>' . e(local_dt($r['created_at'])) . '</td><td>' . $del . '</td></tr>';
     }
     echo '</table>',

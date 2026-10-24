@@ -44,15 +44,17 @@ def main(path):
             g = cr.track.decide()
             if g is None:
                 continue
-            if tracker.dedupe_check(cr.point, cr.t_c):
+            if tracker.dedupe_check(cr.track, cr.point, cr.t_c, g):
                 continue
-            tracker.register_crossing(cr.point, cr.t_c, g, cr.crossing_type)
+            tracker.register_crossing(cr.point, cr.t_c, g, cr.crossing_type,
+                                      getattr(cr.track, "pal", None))
 
     c = tracker.counters()
     print(f"frames={n_frames}  tracks={len(tracker.tracks)} "
           f"(+{len(tracker.lost)} recently lost)")
     print(f"unique_crossed={c['unique_crossed']}  suppressed={c['suppressed']}  "
           f"estimated={c['estimated']}  lost_before_line={c['lost_before_line']}  "
+          f"uncertain={c['uncertain']}  vote_resets={c['vote_resets']}  "
           f"active={c['active']}  coasting={c['coasting']}")
     print()
     print(f"{'track':>5} {'state':<10} {'hits':>4} {'votes':>10} "

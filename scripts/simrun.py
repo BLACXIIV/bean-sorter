@@ -35,7 +35,7 @@ def get(base, path):
     return json.loads(urllib.request.urlopen(base + path, timeout=5).read())
 
 
-def main(seconds=60, fps_cap=None):
+def main(seconds=60, fps_cap=None, dump=None):
     port = free_port()
     base = f"http://127.0.0.1:{port}"
     cmd = [sys.executable, str(ROOT / "engine.py"), "--simulate",
@@ -80,18 +80,48 @@ def main(seconds=60, fps_cap=None):
         print("run", post(base, "/api/mode", {"mode": "run", "batch_name": "sim-60s"}))
 
         t_end = time.time() + seconds
-        while time.time() < t_end:
+        drained = False
+        while time.time() < t_end and not drained:
             time.sleep(10)
             st = get(base, "/api/status")
-            print(f"  t+{int(t_end - time.time() + 10)}s-remaining "
+            gt = st.get("ground_truth") or {}
+            # schedule mode stops spawning at BEAN_SIM_SECS of sim time; the
+            # run ends when every bean has physically left the frame (drain),
+            # so counted vs truth has no end-of-run off-by-one
+            drained = bool(gt) and gt.get("spawned", 0) > 0 \
+                and gt.get("active", 1) == 0
+            print(f"  t+{int(max(0, t_end - time.time()))}s-left "
                   f"fps={st['fps']} counts={st['counts']} "
-                  f"tracking={st.get('tracking')}")
-        st = get(base, "/api/status")
+                  f"tracking={st.get('tracking')} gt={gt or '-'}")
+        print(f"  drain done, active={st.get('ground_truth', {}).get('active')}")
         tr = st.get("tracking") or {}
         print("FINAL", json.dumps(tr), st["counts"])
+        if dump:
+            Path(dump).parent.mkdir(parents=True, exist_ok=True)
+            Path(dump).write_text(json.dumps(st))
         gt = st.get("ground_truth")
         if gt:
-            print("GROUND TRUTH", json.dumps(gt))
+            # per-bean fire attribution: every pulse is tagged with the
+            # physical bean nearest the line at fire time
+            beans = gt.get("beans") or []
+            fires = gt.get("fires") or []
+            defects = [b for b in beans if b["grade"] == 4 and b["crossed"]]
+            goods = [b for b in beans if b["grade"] != 4 and b["crossed"]]
+            hit_ids = {f.get("bean_id") for f in fires if f.get("bean_id")}
+            d_blown = sum(1 for b in defects if b["id"] in hit_ids)
+            g_blown = sum(1 for b in goods if b["id"] in hit_ids)
+            unc = sum(1 for f in fires if f.get("uncertain"))
+            orphan = sum(1 for f in fires if not f.get("bean_id"))
+            print("ATTR "
+                  f"defects={len(defects)} blown={d_blown} "
+                  f"missed={len(defects) - d_blown} "
+                  f"good={len(goods)} good_blown={g_blown} "
+                  f"unc_blows={unc} orphan={orphan}")
+            missed = [b["id"] for b in defects if b["id"] not in hit_ids]
+            if missed:
+                print("  missed defect beans:", missed)
+            print("GROUND TRUTH", json.dumps(
+                {k: v for k, v in gt.items() if k not in ("beans", "fires")}))
             ok = (tr.get("unique_crossed") == gt["crossed"]
                   and st["counts"]["blown"] == gt["defects"])
             print(f"  unique_crossed={tr.get('unique_crossed')} vs "
@@ -108,10 +138,12 @@ def main(seconds=60, fps_cap=None):
 
 
 if __name__ == "__main__":
-    _s, _cap = 60, None
+    _s, _cap, _dump = 60, None, None
     for a in sys.argv[1:]:
         if a.startswith("--fps-cap="):
             _cap = float(a.split("=", 1)[1])
+        elif a.startswith("--dump="):
+            _dump = a.split("=", 1)[1]
         else:
             _s = int(a)
-    sys.exit(main(_s, _cap))
+    sys.exit(main(_s, _cap, _dump))

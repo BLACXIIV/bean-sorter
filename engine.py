@@ -42,7 +42,10 @@ TUNABLES = ("DEFECT_BIAS", "UNKNOWN_DE", "VALVE_DELAY_S", "VALVE_PULSE_S",
             "DIFF_THRESHOLD", "MIN_BEAN_AREA", "MAX_BEAN_AREA", "DEFECT_VOTE_RATIO",
             "BELT_TOLERANCE", "BELT_L_WEIGHT",
             "TRACK_MAX_COAST_S", "TRACK_REID_DE",
-            "DEDUPE_RADIUS_PX", "DEDUPE_WINDOW_S")
+            "DEDUPE_RADIUS_PX", "DEDUPE_WINDOW_S", "TRACK_MIN_VOTES")
+
+# string tunables validated against a fixed set (not numeric ranges)
+STRING_TUNABLES = {"UNCERTAIN_POLICY": ("blow", "pass")}
 
 
 class Engine:
@@ -66,6 +69,9 @@ class Engine:
             self.valve = make_valve()
         else:
             self.valve = SimulatedValve()
+        # sim-only: let the valve attribute each fire to a physical bean
+        if hasattr(self.valve, "fires") and hasattr(self.cam, "bean_truth"):
+            self.valve.ground = self.cam
         self.apply_tunables()
 
         self.mode = "idle"          # idle | calibrate | run
@@ -128,6 +134,10 @@ class Engine:
         for k in TUNABLES:
             if k in saved:
                 setattr(C, k, saved[k])
+        for k, allowed in STRING_TUNABLES.items():
+            v = saved.get(k)
+            if v in allowed:
+                setattr(C, k, v)
 
     def stop(self):
         self._stop = True
@@ -151,7 +161,11 @@ class Engine:
             self.tim_n += 1
             view = frame
             if self.mode == "run" and self.sorter is not None:
-                view = self.sorter.process(frame, self.armed, self.tim, t=now,
+                # schedule-mode sim camera supplies deterministic sim time so
+                # paired tracker runs see identical inputs at any loop fps
+                t_sim = getattr(self.cam, "sim_t", None)
+                view = self.sorter.process(frame, self.armed, self.tim,
+                                           t=now if t_sim is None else t_sim,
                                            annotate=self.stream_clients > 0)
             elif self.mode == "calibrate":
                 if self.show_detected:
@@ -262,7 +276,12 @@ class Engine:
                     "p2": [self.line.p2[0] / FRAME_W, self.line.p2[1] / FRAME_H]}
         gt = ({"spawned": self.cam.spawned_total,
                "crossed": self.cam.crossed_total,
-               "defects": self.cam.crossed_defects}
+               "defects": self.cam.crossed_defects,
+               "active": getattr(self.cam, "active_count", 0),
+               "step_px": getattr(self.cam, "step_px", None),
+               "sim_dt": getattr(self.cam, "_sim_dt", None),
+               "beans": list(self.cam.bean_truth.values()),
+               "fires": getattr(self.valve, "fires", [])}
               if hasattr(self.cam, "crossed_total") else None)
         return {"mode": self.mode, "armed": self.armed, "fps": round(self.fps, 1),
                 "sim": self.sim or self.valve_source == "sim",
@@ -281,6 +300,7 @@ class Engine:
                 "tracking": (self.sorter.trk_counters() if self.sorter is not None
                            else {"active": 0, "coasting": 0, "unique_crossed": 0,
                                  "suppressed": 0, "estimated": 0,
+                                 "uncertain": 0, "vote_resets": 0,
                                  "lost_before_line": 0,
                                  "enabled": bool(C.FEATURES.get("trajectory_tracking"))}),
                 "session_id": self.session_id, "counts": counts,
@@ -428,15 +448,42 @@ def _belt_click(frame, pt):
     return None, ok(hex=hexv, id=cid, warnings=E._warnings())
 
 
-def _patch_palette(frame, pt):
-    """Direct colour grab at a tap point - no bean detection (dev helper)."""
-    r = C.BELT_PATCH // 2
-    x, y = int(pt[0]), int(pt[1])
-    patch = frame[max(0, y - r):y + r + 1, max(0, x - r):x + r + 1]
+def _patch_click(frame, pt, grade):
+    """Guarded patch fallback for a GRADE tap with no bean outline at the point
+    (e.g. a bean colour segmentation misses). Same BELT_PATCH square as a belt
+    tap; accepted only when the patch is uniform AND provably not belt/background.
+    Returns a palette list or None when rejected."""
+    p = C.BELT_PATCH // 2
+    x0, x1 = int(max(0, pt[0] - p)), int(min(FRAME_W, pt[0] + p + 1))
+    y0, y1 = int(max(0, pt[1] - p)), int(min(FRAME_H, pt[1] + p + 1))
+    patch = frame[y0:y1, x0:x1]
     if patch.size == 0:
-        return None, (x, y), 0
-    return (vision.extract_palette(patch.reshape(-1, 3)), (x, y),
-            patch.shape[0] * patch.shape[1])
+        return None
+    lab = vision.bgr_to_lab(patch.reshape(-1, 3))
+    med = np.median(lab, axis=0)
+    std = lab.std(axis=0)
+    if std[1] > 10 or std[2] > 10 or std[0] > 25:          # (a) not uniform
+        return None
+    if E.belt is not None:                                # (b) must not look like belt
+        diff = E.belt.colors - med
+        diff[:, 0] *= C.BELT_L_WEIGHT
+        if float(np.sqrt((diff * diff).sum(axis=1)).min()) < C.BELT_TOLERANCE:
+            return None
+    elif E.bg is not None:                                # (c) no belt: differ from bg
+        bgp = E.bg[y0:y1, x0:x1]
+        if bgp.shape != patch.shape:
+            return None
+        d = cv2.absdiff(patch, bgp).max(axis=2)
+        if float(np.median(d)) <= C.DIFF_THRESHOLD:
+            return None
+    else:
+        return None
+    pal = vision.extract_palette(patch.reshape(-1, 3))
+    if not pal:
+        return None
+    E.db.add_sample(grade, int(pt[0]), int(pt[1]), float(patch.shape[0] * patch.shape[1]),
+                    pal, source="patch")
+    return pal
 
 
 @app.route("/api/calibrate/click", methods=["POST", "OPTIONS"])
@@ -455,26 +502,29 @@ def api_click():
     if E.selected_target == "belt":
         error, resp = _belt_click(frame, pt)
         return err(error[1], error[0]) if error else resp
-    pal = None
-    if E.segmentation() != "none":
-        res = calibrate_click(E.db, frame, E.bg, pt, E.selected_target, E.belt)
-        if not isinstance(res, str):          # bean blob found -> normal save
-            _, _, pal = res
-        elif not res.startswith("No bean detected"):
-            return err(res, "TOO_FEW_PIXELS" if "too small" in res
-                       else "BAD_REQUEST")
-    if pal is None:
-        # dev fallback: grab the colour patch under the tap even when no bean
-        # blob (or no detection source at all) is there
-        pal, (x, y), area = _patch_palette(frame, pt)
-        if not pal:
-            return err("No colour at that point",
-                       "NO_BEAN_AT_POINT" if E.segmentation() != "none"
-                       else "NO_SEGMENTATION_SOURCE")
-        E.db.add_sample(E.selected_target, x, y, area, pal)
-        E.message = f"Saved G{E.selected_target} (patch)"
-    else:
-        E.message = f"Saved G{E.selected_target}"
+    # grade tap: needs a detection source; a bean blob at the point is tried
+    # first, then a guarded patch fallback for beans segmentation misses.
+    if E.segmentation() == "none":
+        return err("No detection source - tap the conveyor colour or capture "
+                   "a background first", "NO_SEGMENTATION_SOURCE")
+    res = calibrate_click(E.db, frame, E.bg, pt, E.selected_target, E.belt)
+    if isinstance(res, str):                  # error string
+        if res.startswith("No bean detected"):
+            pal = _patch_click(frame, pt, E.selected_target)
+            if pal is not None:
+                sid = E.db.conn.execute(
+                    "SELECT id FROM samples ORDER BY id DESC LIMIT 1") \
+                    .fetchone()[0]
+                E.undo_stack.append(("sample", sid))
+                E.clf = vision.Classifier(E.db.load_model())
+                E.message = f"Saved G{E.selected_target} (patch)"
+                return ok(grade=E.selected_target, source="patch",
+                          hex=[p.hex for p in pal], warnings=E._warnings())
+            return err(res, "NO_BEAN_AT_POINT")
+        return err(res, "TOO_FEW_PIXELS" if "too small" in res
+                   else "BAD_REQUEST")
+    _, _, pal = res
+    E.message = f"Saved G{E.selected_target}"
     sid = E.db.conn.execute("SELECT id FROM samples ORDER BY id DESC LIMIT 1") \
         .fetchone()[0]
     E.undo_stack.append(("sample", sid))
@@ -560,7 +610,7 @@ def api_reload():
     E.apply_tunables()
     E.belt = E._load_belt()          # PHP admin may have changed belt colours too
     E.clf = vision.Classifier(E.db.load_model())
-    return ok(tunables={k: getattr(C, k) for k in TUNABLES})
+    return ok(tunables={k: getattr(C, k) for k in TUNABLES + tuple(STRING_TUNABLES)})
 
 
 def list_cameras():

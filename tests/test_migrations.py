@@ -3,6 +3,7 @@
 v1: sort_log has no session_id and no tracking columns (user_version=1)
 v2: session_id exists, tracking columns do not        (user_version=2)
 v3: same schema as v2                                 (user_version=3)
+v4: tracking columns exist, samples.source does not   (user_version=4)
 
   python tests/test_migrations.py
 """
@@ -39,7 +40,8 @@ CREATE TABLE sort_log(id INTEGER PRIMARY KEY AUTOINCREMENT,
 CREATE TABLE run_sessions(id INTEGER PRIMARY KEY AUTOINCREMENT,
     batch_name TEXT, started_at TEXT DEFAULT CURRENT_TIMESTAMP, ended_at TEXT,
     g1 INTEGER DEFAULT 0, g2 INTEGER DEFAULT 0, g3 INTEGER DEFAULT 0,
-    g4 INTEGER DEFAULT 0, blown INTEGER DEFAULT 0);
+    g4 INTEGER DEFAULT 0, blown INTEGER DEFAULT 0
+    {extra_sess_cols});
 CREATE TABLE belt_colors(id INTEGER PRIMARY KEY AUTOINCREMENT,
     hex TEXT NOT NULL, L REAL, a REAL, b REAL,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP);
@@ -50,7 +52,13 @@ def make_fixture(path, version):
     """Build a fixture DB at an old user_version with old data."""
     con = sqlite3.connect(path)
     extra = "" if version < 2 else ", session_id INTEGER"
-    con.executescript(BASE_SCHEMA.format(extra_sort_cols=extra))
+    if version >= 4:
+        extra += ", track_id INTEGER, crossing_type TEXT, x_on_line REAL," \
+                 " speed_px_s REAL"
+    extra_sess = (", suppressed INTEGER DEFAULT 0, estimated INTEGER DEFAULT 0,"
+                  " lost INTEGER DEFAULT 0" if version >= 4 else "")
+    con.executescript(BASE_SCHEMA.format(extra_sort_cols=extra,
+                                         extra_sess_cols=extra_sess))
     con.execute(f"PRAGMA user_version={version}")
     sid = ",5" if version >= 2 else ""
     con.execute(f"INSERT INTO sort_log(grade,blown{' ,session_id' if version >= 2 else ''})"
@@ -63,7 +71,7 @@ def make_fixture(path, version):
 
 
 with tempfile.TemporaryDirectory() as td:
-    for version in (1, 2, 3):
+    for version in (1, 2, 3, 4):
         path = Path(td) / f"v{version}.db"
         make_fixture(path, version)
         db = DB(path)                                    # runs the migration
@@ -80,6 +88,12 @@ with tempfile.TemporaryDirectory() as td:
         need = {"suppressed", "estimated", "lost"}
         report(f"v{version}: run_sessions columns present", need <= cols,
                f"missing={need - cols}")
+
+        cols = {r[1] for r in db.conn.execute("PRAGMA table_info(samples)")}
+        report(f"v{version}: samples.source present", "source" in cols,
+               f"missing={'source' if 'source' not in cols else '-'}")
+        r = db.conn.execute("SELECT source FROM samples").fetchone()
+        report(f"v{version}: old sample source defaulted", r == ("bean",), str(r))
 
         r = db.conn.execute("SELECT grade, blown FROM sort_log").fetchone()
         report(f"v{version}: old sort_log row intact", r == (4, 1), str(r))

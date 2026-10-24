@@ -19,7 +19,10 @@ $TUNABLES = [
     'TRACK_REID_DE'      => [3, 40, 0.5, 12.0],
     'DEDUPE_RADIUS_PX'   => [5, 100, 1, 25],
     'DEDUPE_WINDOW_S'    => [0.02, 1.0, 0.01, 0.15],
+    'TRACK_MIN_VOTES'    => [1, 8, 1, 2],
 ];
+// fixed-choice tunables stored in the same settings key (strings, not numbers)
+$CHOICES = ['UNCERTAIN_POLICY' => [['blow', 'pass'], 'blow']];
 
 $msg = ''; $err = '';
 $saved = setting_get('tunables', []) ?: [];
@@ -27,11 +30,16 @@ $current = [];
 foreach ($TUNABLES as $k => $t) {
     $current[$k] = isset($saved[$k]) && is_numeric($saved[$k]) ? (float)$saved[$k] : $t[3];
 }
+foreach ($CHOICES as $k => $c) {
+    $current[$k] = isset($saved[$k]) && in_array($saved[$k], $c[0], true)
+        ? $saved[$k] : $c[1];
+}
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
     if (isset($_POST['reset'])) {
         foreach ($TUNABLES as $k => $t) $current[$k] = $t[3];
+        foreach ($CHOICES as $k => $c) $current[$k] = $c[1];
         setting_set('tunables', $current);
         $msg = 'Reset to defaults.';
     } else {
@@ -42,6 +50,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $bad[] = "$k must be {$t[0]}-{$t[1]}";
             } else {
                 $current[$k] = (float)$v;
+            }
+        }
+        foreach ($CHOICES as $k => $c) {
+            $v = $_POST[$k] ?? '';
+            if (!in_array($v, $c[0], true)) {
+                $bad[] = "$k must be one of " . implode('/', $c[0]);
+            } else {
+                $current[$k] = $v;
             }
         }
         if ($bad) {
@@ -70,6 +86,15 @@ foreach ($TUNABLES as $k => $t) {
          ' min="' . $t[0] . '" max="' . $t[1] . '" step="' . $t[2] . '" required style="width:130px"></td>',
          '<td class="muted">' . $t[0] . ' - ' . $t[1] . '</td>',
          '<td class="muted">' . $t[3] . '</td></tr>';
+}
+foreach ($CHOICES as $k => $c) {
+    echo '<tr><td class="mono">' . e($k) . '</td><td><select name="' . e($k) . '">';
+    foreach ($c[0] as $opt) {
+        $sel = $current[$k] === $opt ? ' selected' : '';
+        echo '<option value="' . e($opt) . '"' . $sel . '>' . e($opt) . '</option>';
+    }
+    echo '</select></td><td class="muted">' . implode(' / ', $c[0]) . '</td>',
+         '<td class="muted">' . $c[1] . '</td></tr>';
 }
 echo '</table><div class="btnrow" style="margin-top:10px">',
      '<input type="hidden" name="csrf" value="' . e(csrf_token()) . '">',

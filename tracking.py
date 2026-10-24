@@ -153,8 +153,11 @@ class TTrack:
         TTrack._next += 1
         self.kf = _Kalman(det["centroid"])
         self.pos = (float(det["centroid"][0]), float(det["centroid"][1]))
-        self.seg_prev = None              # last position used for crossing tests
-        self.seg_prev_t = None
+        # seg_prev starts AT the spawn point: a bean seen once and then
+        # coasting must still test the spawn->predicted segment for a crossing
+        # (was None -> a single-sighting bean near the line never crossed).
+        self.seg_prev = self.pos
+        self.seg_prev_t = t
         self.last_t = t                   # last time a detection matched
         self.hits = 1
         self.state = "tentative"          # tentative|confirmed|coasting|lost
@@ -166,6 +169,11 @@ class TTrack:
         self.area = float(det["area"])
         self.pal = None                   # running mean Lab (re-id appearance)
         self.pal_w = 0.0
+        # every per-det palette shown, as raw Lab clusters (k x 3) - real
+        # cluster sets, not means: scoring a det palette against a blended
+        # mean inflates the distance (same bean scored 13.4 vs its own mean,
+        # over TRACK_REID_DE) and broke re-id for multi-cluster beans.
+        self.pal_hist = deque(maxlen=20)
         self.coast = 0.0                  # seconds since last detection
         self.lost_t = None
         self.revived = False              # True once re-identified after a loss
@@ -186,6 +194,7 @@ class TTrack:
                     self.pal = (self.pal * self.pal_w + mean * wsum) \
                         / (self.pal_w + wsum)
                 self.pal_w += wsum
+                self.pal_hist.append(lab)
 
     @property
     def speed_px_s(self):
@@ -201,6 +210,12 @@ class TTrack:
         good = {g: n for g, n in self.votes.items() if g != 4}
         return max(good, key=good.get) if good else 4
 
+    def decide_safe(self):
+        """decide() plus an uncertainty flag: fewer than TRACK_MIN_VOTES
+        non-suspect votes means the grade is not trusted (the caller maps it
+        to the configured UNCERTAIN_POLICY)."""
+        return self.decide(), sum(self.votes.values()) < int(C.TRACK_MIN_VOTES)
+
 
 # ------------------------------------------------------------------ tracker
 class TrajectoryTracker:
@@ -214,11 +229,14 @@ class TrajectoryTracker:
         self.registry = deque(maxlen=200)  # counted crossings (t_c, pt, grade)
         self.suppressed = 0
         self.estimated = 0
+        self.uncertain = 0
+        self.vote_resets = 0
         self.lost_before_line = 0
         self.unique_crossed = 0
         self._last_t = None
         self._belt = None                 # learned belt unit direction
         self._belt_speed = 0.0
+        self._get_pal = None              # lazy palette getter (sorter injects)
 
     # ---------------------------------------------------------------- public
     def set_line(self, line):
@@ -229,9 +247,13 @@ class TrajectoryTracker:
             tr.seg_prev = None
             tr.seg_prev_t = None
 
-    def update(self, dets, t):
+    def update(self, dets, t, get_pal=None):
         """One frame. Returns {"votes": [(track, det)], "crossings": [Crossing]}.
-        The caller adds grade votes first, then handles crossings."""
+        The caller adds grade votes first, then handles crossings.
+        get_pal(det) -> palette|None is called lazily: only for detections
+        whose track still needs votes, or unmatched ones needing re-id."""
+        if get_pal is not None:
+            self._get_pal = get_pal
         dt = 1e-3 if self._last_t is None else max(1e-4, t - self._last_t)
         self._last_t = t
         crossings = []
@@ -282,10 +304,35 @@ class TrajectoryTracker:
         self.tracks = survivors
 
         # brand new tracks for still-unmatched detections
+        typ_area = math.pi * (self._typical_diameter() / 2.0) ** 2
         for di, det in enumerate(dets):
             if di in matched_d:
                 continue
+            if det.get("palette") is None and self._get_pal is not None:
+                # the spawn palette MUST live on the track (pal/pal_hist via
+                # _absorb): the sorter only fetches it after creation, which
+                # left 1-hit tracks with pal=None - the re-id palette gate and
+                # the stale-vote reset both key off it and silently skipped,
+                # so a dead ghost could re-bind any-coloured bean and keep its
+                # votes (harsh s13: seam blob voted 4, absorbed bean1's dets,
+                # crossed -> false blow).
+                det["palette"] = self._get_pal(det)
             tr = TTrack(det, t)
+            if self._belt is not None and not det.get("_suspect"):
+                # belt prior: a bean seen once still drifts with the belt, so
+                # a single-frame bean can reach the line (else zero-velocity
+                # Kalman coasts in place and dies lost). Only when the det is
+                # plausibly a NEW bean - normal area and no live track claims
+                # it - else ghosts of existing beans drift over the line too.
+                lo, hi = C.TRACK_AREA_RATIO
+                area_ok = lo <= float(det["area"]) / max(1e-6, typ_area) <= hi
+                claimed = any(
+                    math.hypot(det["centroid"][0] - t2.kf.pos[0],
+                               det["centroid"][1] - t2.kf.pos[1])
+                    <= 1.25 * self._gate(t2, dt) for t2 in self.tracks)
+                if area_ok and not claimed:
+                    tr.kf.x[2] = self._belt[0] * self._belt_speed
+                    tr.kf.x[3] = self._belt[1] * self._belt_speed
             self.tracks.append(tr)
             votes.append((tr, det))
 
@@ -320,14 +367,19 @@ class TrajectoryTracker:
 
     def _nms(self, dets):
         """Merge detections closer than factor * typical diameter (one bean
-        reported as two blobs). Keeps the larger blob."""
+        reported as two blobs). Keeps the larger blob; the survivor is marked
+        "_suspect" (it may be two beans seen as one) so it never votes."""
         lim = float(C.TRACK_MIN_SPACING_FACTOR) * self._typical_diameter()
         keep = []
         for d in sorted(dets, key=lambda d: -float(d["area"])):
             cx, cy = d["centroid"]
-            if all(math.hypot(cx - k["centroid"][0], cy - k["centroid"][1])
-                   >= lim for k in keep):
+            near = next((k for k in keep
+                         if math.hypot(cx - k["centroid"][0],
+                                       cy - k["centroid"][1]) < lim), None)
+            if near is None:
                 keep.append(d)
+            else:
+                near["_suspect"] = True    # absorbed a neighbour's blob
         return keep
 
     def _assign(self, dets, dt):
@@ -387,6 +439,10 @@ class TrajectoryTracker:
         of spawning a ghost track that would count it twice."""
         pool = [tr for tr in self.lost if t - tr.lost_t <= C.TRACK_REID_WINDOW_S]
         pool += [tr for tr in self.tracks if tr.last_t < t]  # unmatched this frame
+        if not pool:
+            return None
+        if det.get("palette") is None and self._get_pal is not None:
+            det["palette"] = self._get_pal(det)     # on demand: re-id needs it
         return (self._reid_scan(det, t, dt, [tr for tr in pool if not tr.counted])
                 or self._reid_scan(det, t, dt, [tr for tr in pool if tr.counted]))
 
@@ -408,14 +464,59 @@ class TrajectoryTracker:
             if not (lo <= float(det["area"]) / max(1e-6, tr.area) <= hi):
                 continue
             pal = det.get("palette")
-            if tr.pal is not None and pal:
-                ref = {0: np.asarray(tr.pal, np.float32).reshape(1, 3)}
-                if vision.Classifier(ref).scores(pal)[0] > C.TRACK_REID_DE:
+            if pal and (tr.pal is not None or tr.pal_hist):
+                # palette-vs-palette: the det's clusters must land near SOME
+                # palette the track actually showed (pal_hist entries are kx3
+                # cluster sets). tr.pal is a blended mean - scoring against it
+                # inflates dE and rejects the same bean (harsh fragmentation).
+                refs = list(tr.pal_hist) or [tr.pal]
+                best_de = min(
+                    vision.Classifier(
+                        {0: np.asarray(h, np.float32).reshape(-1, 3)}
+                    ).scores(pal)[0] for h in refs)
+                if best_de > float(C.TRACK_REID_DE):
                     continue
             best, best_d = tr, d
         return best
 
     def _match(self, tr, det, t, dt, crossings):
+        # area far off the track's own median -> merged/torn blob: suspect.
+        lo, hi = C.TRACK_AREA_RATIO
+        if not (lo <= float(det["area"]) / max(1e-6, tr.area) <= hi):
+            det["_suspect"] = True
+        # A track that missed frames or was re-identified may now be a
+        # DIFFERENT bean; only if the palette proves it may the old votes go:
+        # the new palette must be far from the track palette AND far from every
+        # palette the track has ever shown (a two-sided bean must not lose its
+        # defect votes to a rebind - S19). (S15-jam seed 5004: 7 stale G1 votes
+        # froze a G4 bean's track at MAX_VOTES -> defect passed.)
+        if tr.votes and tr.pal is not None and not det.get("_suspect") \
+                and (tr.coast > 0.0 or tr.revived):
+            pal = det.get("palette")
+            if pal is None and self._get_pal is not None:
+                det["palette"] = pal = self._get_pal(det)
+            if pal is not None:
+                # "current" = the last palette actually shown (real clusters),
+                # falling back to the blended mean when nothing was absorbed
+                cur = tr.pal_hist[-1] if tr.pal_hist else tr.pal
+                ref = {0: np.asarray(cur, np.float32).reshape(-1, 3)}
+                far_from_current = \
+                    vision.Classifier(ref).scores(pal)[0] \
+                    > float(C.TRACK_REID_DE)
+                far_from_history = all(
+                    vision.Classifier(
+                        {0: np.asarray(h, np.float32).reshape(-1, 3)}
+                    ).scores(pal)[0] > float(C.TRACK_REID_DE)
+                    for h in tr.pal_hist)
+                if far_from_current and far_from_history:
+                    tr.votes.clear()      # proven different bean -> start over
+                    tr.pal, tr.pal_w = None, 0.0
+                    tr.pal_hist.clear()
+                    self.vote_resets += 1
+        # palette on demand (a): only while this track still collects votes
+        if det.get("palette") is None and self._get_pal is not None \
+                and sum(tr.votes.values()) < int(C.MAX_VOTES):
+            det["palette"] = self._get_pal(det)
         tr.kf.update(det["centroid"])
         tr.hits += 1
         tr.last_t = t
@@ -492,6 +593,8 @@ class TrajectoryTracker:
         self.unique_crossed += 1
         if crossing_type == "estimated":
             self.estimated += 1
+        elif crossing_type == "uncertain":
+            self.uncertain += 1
 
     # ------------------------------------------------------------- reporting
     def counters(self):
@@ -500,4 +603,6 @@ class TrajectoryTracker:
                 "unique_crossed": self.unique_crossed,
                 "suppressed": self.suppressed,
                 "estimated": self.estimated,
+                "uncertain": self.uncertain,
+                "vote_resets": self.vote_resets,
                 "lost_before_line": self.lost_before_line}

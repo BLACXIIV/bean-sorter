@@ -121,6 +121,7 @@ class Sorter:
         self.show_tracks = False
         self.stats = Counter()
         self.blown = 0
+        self.n_uncertain = 0
         self.flash_until = 0.0
         self.idx = 0
         self._rec = None
@@ -146,12 +147,9 @@ class Sorter:
         for b in vision.find_beans(frame, self.bg, self.belt):
             if self._drop_p and self._drop_rng.random() < self._drop_p:
                 continue
-            d = {"centroid": b.centroid, "area": b.area,
-                 "contour": b.contour, "palette": None}
-            if self.use_traj:               # re-id needs appearance up front
-                d["palette"] = vision.extract_palette(
-                    vision.bean_pixels(frame, b.contour, self.belt))
-            dets.append(d)
+            dets.append({"centroid": b.centroid, "area": b.area,
+                         "contour": b.contour, "palette": None})
+            # palettes are extracted ON DEMAND (vote loop, re-id) - not here
         return dets
 
     def _palette(self, frame, det):
@@ -159,8 +157,10 @@ class Sorter:
             return det["palette"]
         if det.get("contour") is None:
             return None
-        return vision.extract_palette(
+        pal = vision.extract_palette(
             vision.bean_pixels(frame, det["contour"], self.belt))
+        det["palette"] = pal                 # cache: tracker reuses it
+        return pal
 
     # ---------------------------------------------------------------- process
     def process(self, frame, armed=True, tim=None, t=None, detections=None,
@@ -176,11 +176,18 @@ class Sorter:
         matched = []
         if self.use_traj:
             tu = time.perf_counter()
-            res = self.tracker.update(detections, t)
+            res = self.tracker.update(
+                detections, t, get_pal=lambda d: self._palette(frame, d))
             if tim is not None:
                 tim["track"] += (time.perf_counter() - tu) * 1000
             for tr, det in res["votes"]:
-                if sum(tr.votes.values()) < C.MAX_VOTES:
+                det["_track"] = tr.id
+                det["_tstate"] = tr.state
+                det["_counted"] = tr.counted
+                # a suspect detection (NMS-merged blob, area far off the
+                # track's own median) never casts a vote
+                if not det.get("_suspect") \
+                        and sum(tr.votes.values()) < C.MAX_VOTES:
                     tc = time.perf_counter()
                     pal = self._palette(frame, det)
                     if pal:
@@ -196,6 +203,8 @@ class Sorter:
         else:
             matched = self.tracker.update(detections, self.idx)
             for tr, det in matched:
+                det["_track"] = tr.id
+                det["_tstate"] = "live"
                 if sum(tr.votes.values()) < C.MAX_VOTES:
                     tc = time.perf_counter()
                     pal = self._palette(frame, det)
@@ -233,7 +242,19 @@ class Sorter:
 
     # ------------------------------------------------------- counting / firing
     def _count(self, tr, t_c, point, along, crossing_type, armed, now):
-        grade = tr.decide()
+        if self.use_traj:
+            grade, uncertain = tr.decide_safe()
+            if uncertain:
+                self.n_uncertain += 1
+                crossing_type = "uncertain"
+                if C.UNCERTAIN_POLICY == "blow":
+                    grade = 4           # fail-safe: blow the unknown bean
+                else:                   # "pass": count it, never fire
+                    armed = False
+                    if grade is None:
+                        grade = 1
+        else:
+            grade = tr.decide()
         if grade is None:
             return
         if self.tracker.dedupe_check(tr, point, t_c, grade):
@@ -249,7 +270,9 @@ class Sorter:
         fire = (grade == 4 and armed)
         if fire:
             delay = max(0.0, t_c + float(C.VALVE_DELAY_S) - now)
-            self.valve.pulse(delay=delay)
+            self.valve.pulse(delay=delay,
+                             uncertain=(crossing_type == "uncertain"),
+                             t_c=t_c, x_on_line=point[0])
             self.blown += 1
             self.flash_until = now + 0.25
         self.db.log_event(grade, fire, self.session_id,
@@ -265,7 +288,9 @@ class Sorter:
              "area": round(float(d["area"]), 1),
              "palette": [[round(float(v), 3) for v in p.lab]
                          + [round(float(p.weight), 4)] for p in (d.get("palette") or [])],
-             "vote": d.get("_vote")} for d in detections]}
+             "vote": d.get("_vote"), "track": d.get("_track"),
+             "tstate": d.get("_tstate"), "counted": d.get("_counted"),
+             "suspect": bool(d.get("_suspect"))} for d in detections]}
         self._rec.write(json.dumps(line) + "\n")
         self._rec.flush()
 
@@ -310,7 +335,8 @@ class Sorter:
         c = self.tracker.counters() if self.use_traj else {
             "active": len(self.tracker.tracks), "coasting": 0,
             "unique_crossed": sum(self.stats.values()), "suppressed": 0,
-            "estimated": 0, "lost_before_line": 0}
+            "estimated": 0, "vote_resets": 0, "lost_before_line": 0}
+        c["uncertain"] = self.n_uncertain
         c["enabled"] = self.use_traj
         return c
 

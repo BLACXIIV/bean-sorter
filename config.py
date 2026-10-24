@@ -71,3 +71,6 @@ DEDUPE_RADIUS_PX = 25         # *(5-100) crossings closer than this are duplicat
 DEDUPE_WINDOW_S = 0.15        # *(0.02-1.0) within this window, seconds
 TRAIL_LEN = 30                # positions kept per track for the trail overlay
 TRACK_HUNGARIAN_MAX = 40      # above n tracks or dets: greedy-by-cost instead
+TRACK_MIN_VOTES = 2           # *(1-8) non-suspect votes below -> "uncertain" bean
+UNCERTAIN_POLICY = "blow"     # *(blow|pass) uncertain bean: blow = fail-safe
+                            # (fires valve, wastes some good beans); pass = save

@@ -121,7 +121,9 @@
         h += '<tr><td><span class="swatch" style="background:' + c.hex + '"></span></td>' +
           '<td class="mono">' + c.hex + '</td>' +
           '<td>' + Math.round(c.weight * 100) + '%</td>' +
-          '<td>#' + c.sample_id + '</td></tr>';
+          '<td>#' + c.sample_id +
+          (c.source === 'patch' ? ' <span class="chip">patch</span>' : '') +
+          '</td></tr>';
       });
       h += '</table></div></div>';
     });
@@ -245,6 +247,8 @@
         if (j.ok) {
           if (j.note) toast(j.note);
           else if (j.id) toast('Belt colour saved', [j.hex]);
+          else if (j.source === 'patch')
+            toast('Saved from patch (bean outline not detected): G' + j.grade, j.hex);
           else toast('Saved G' + j.grade, j.hex);
           refreshGrades(); refreshBelt();
         }
@@ -342,6 +346,7 @@
           'Unique ' + (tr.unique_crossed || 0) +
           ' - duplicates suppressed ' + (tr.suppressed || 0) +
           ' - estimated ' + (tr.estimated || 0) +
+          ' - uncertain ' + (tr.uncertain || 0) +
           ' - lost before line ' + (tr.lost_before_line || 0);
         $('btn-tracks').textContent = j.show_tracks ? 'Tracks: ON' : 'Tracks';
         $('btn-arm').textContent = j.armed ? 'DISARM' : 'ARM';

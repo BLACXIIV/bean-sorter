@@ -47,8 +47,9 @@ class FakeValve:
     def __init__(self):
         self.pulses = []
 
-    def pulse(self, delay=None, duration=None):
-        self.pulses.append(delay)
+    def pulse(self, delay=None, duration=None, uncertain=False,
+              t_c=None, x_on_line=None):
+        self.pulses.append((delay, uncertain))
 
 
 class FakeDB:
@@ -67,6 +68,8 @@ class Bean:
 
     def reset(self):
         self.x, self.y, self.vy = self.x0, self.y0, self.vy0
+        if hasattr(self, "tc_true"):
+            del self.tc_true          # (t, x) of the real y=360 crossing
 
     def det(self, dx=0.0, dy=0.0, area_scale=1.0):
         return {"centroid": (self.x + dx, self.y + dy),
@@ -86,16 +89,45 @@ def run_scenario(use_traj, beans, fps, seconds, advance, emit, line=None):
         b.reset()
     valve, db = FakeValve(), FakeDB()
     sorter = make_sorter(use_traj, valve, db, line or Line((0, 360), (1280, 360)))
-    t = 0.0
+    t, ev_i = 0.0, 0
     for f in range(int(seconds * fps)):
         t += 1.0 / fps
         dets = []
         for b in beans:
+            py = b.y
             advance(b, 1.0 / fps, t)
+            if py < 360 <= b.y and not hasattr(b, "tc_true"):
+                b.tc_true = (t, b.x)      # real crossing, ground truth
             if -80 < b.y < 780:
                 dets += emit(b, f, t)
         sorter.process(FRAME, True, t=t, detections=dets)
+        for e in db.events[ev_i:]:        # stamp events with frame time
+            e["t"] = t
+        ev_i = len(db.events)
     return sorter
+
+
+def blown_g4(sorter, beans, radius=90.0, window=0.8):
+    """Set of grade-4 bean indices credited with a valve pulse.
+
+    A blown event is credited to every G4 bean whose true crossing is within
+    `window` seconds and `radius` px of it - a pulse can only act on the beans
+    actually at the line at that moment (touching pairs share one pulse)."""
+    out = set()
+    for e in sorter.db.events:
+        if not e.get("blown"):
+            continue
+        x_on = (e.get("x_on_line") or 0.0) * 1280.0
+        for i, b in enumerate(beans):
+            if b.grade != 4 or not hasattr(b, "tc_true"):
+                continue
+            tc, xc = b.tc_true
+            if abs(tc - e.get("t", tc)) <= window and abs(xc - x_on) <= radius:
+                out.add(i)
+    return out
+
+
+INVARIANTS = []        # (name, legacy blown-beans, trajectory blown-beans, xfail)
 
 
 def std_beans(n, speed, grades, r=34, y0=-60.0, dy=90.0):
@@ -125,6 +157,8 @@ def scenario(name, expected_counts, expected_fires, args, expect_estimated=None)
            f"counted={counted}/{expected_counts} fires={fires}/{expected_fires}{extra}")
     leg = run_scenario(False, beans, fps, seconds, advance, emit)
     lc = sum(leg.stats.values())
+    INVARIANTS.append((name, len(blown_g4(leg, beans)),
+                       len(blown_g4(trj, beans)), False))
     table.append((name, expected_counts, lc, counted,
                   expected_fires, len(leg.valve.pulses), fires))
 
@@ -219,31 +253,39 @@ def run_s9(use_traj):
         b.reset()
     valve, db = FakeValve(), FakeDB()
     sorter = make_sorter(use_traj, valve, db, Line((0, 360), (1280, 360)))
-    t = 0.0
+    t, ev_i = 0.0, 0
     for f in range(160):
         t += 1.0 / 20
         dets = []
         for b in beans:
+            py = b.y
             if b.mark and stop_t[0] is None and b.y >= 360:
                 stop_t[0] = t
             if b.mark and stop_t[0] is not None and t < stop_t[0] + 1.0:
                 pass                            # frozen on the line for 1 s
             else:
                 b.y += b.vy / 20
+            if py < 360 <= b.y and not hasattr(b, "tc_true"):
+                b.tc_true = (t, b.x)
             if -80 < b.y < 780:
                 if b.mark and stop_t[0] is not None and t < stop_t[0] + 1.0 \
                         and rng9.random() < 0.3:
                     continue                    # detection flicker while stopped
                 dets.append(b.det())
         sorter.process(FRAME, True, t=t, detections=dets)
-    return sorter
+        for e in db.events[ev_i:]:
+            e["t"] = t
+        ev_i = len(db.events)
+    return sorter, beans
 
 
-trj9 = run_s9(True)
+trj9, beans9 = run_s9(True)
 n9, f9 = sum(trj9.stats.values()), len(trj9.valve.pulses)
 report("S9 belt stop on line (trajectory)", n9 == 30 and f9 == ng4,
        f"counted={n9}/30 fires={f9}/{ng4}")
-leg9 = run_s9(False)
+leg9, _ = run_s9(False)
+INVARIANTS.append(("S9 belt stop on line", len(blown_g4(leg9, beans9)),
+                   len(blown_g4(trj9, beans9)), False))
 table.append(("S9 belt stop on line", 30, sum(leg9.stats.values()), n9,
               ng4, len(leg9.valve.pulses), f9))
 
@@ -269,25 +311,33 @@ def run_s11(use_traj):
         b.reset()
     valve, db = FakeValve(), FakeDB()
     sorter = make_sorter(use_traj, valve, db, Line((0, 360), (1280, 360)))
-    t = 0.0
+    t, ev_i = 0.0, 0
     for f in range(180):
         t += 1.0 / 20
         if f == 40:
             sorter.set_line(Line((0, 520), (1280, 520)))   # move mid-run
         dets = []
         for b in beans:
+            py = b.y
             b.y += b.vy / 20
+            if py < 360 <= b.y and not hasattr(b, "tc_true"):
+                b.tc_true = (t, b.x)
             if -80 < b.y < 780:
                 dets.append(b.det())
         sorter.process(FRAME, True, t=t, detections=dets)
-    return sorter
+        for e in db.events[ev_i:]:
+            e["t"] = t
+        ev_i = len(db.events)
+    return sorter, beans
 
 
-trj11 = run_s11(True)
+trj11, beans11 = run_s11(True)
 n11 = sum(trj11.stats.values())
 report("S11 line moved (trajectory)", n11 == 30,
        f"counted={n11}/30 (move itself must count nothing)")
-leg11 = run_s11(False)
+leg11, _ = run_s11(False)
+INVARIANTS.append(("S11 line moved", len(blown_g4(leg11, beans11)),
+                   len(blown_g4(trj11, beans11)), False))
 table.append(("S11 line moved", 30, sum(leg11.stats.values()), n11,
               ng4, len(leg11.valve.pulses), len(trj11.valve.pulses)))
 
@@ -370,7 +420,7 @@ def run_s15(use_traj, seed, mode="jam"):
                                          row * lanes + lane + 1))
     valve, db = FakeValve(), FakeDB()
     sorter = make_sorter(use_traj, valve, db, Line((0, 360), (1280, 360)))
-    t = 0.0
+    t, ev_i = 0.0, 0
     for f in range(nF):
         t += 1.0 / fps
         merged_from = {}
@@ -380,10 +430,13 @@ def run_s15(use_traj, seed, mode="jam"):
         dets = []
         skip = set()
         for i, b in enumerate(beans):
+            py = b.y
             if mode == "overlap":
                 b.y += b.vy / fps          # per-bean speed: beans CAN overlap
             else:
                 b.y += lane_v[b.lane, f] / fps
+            if py < 360 <= b.y and not hasattr(b, "tc_true"):
+                b.tc_true = (t, b.x)
         if mode == "jam":
             for lane, lst in lane_of.items():   # beans jam, never overlap
                 lst.sort(key=lambda b: -b.y)
@@ -409,34 +462,44 @@ def run_s15(use_traj, seed, mode="jam"):
             wx = 8.0 * math.sin(0.02 * b.y + b.phase)
             dets.append(b.det(dx=wx + jx[i, f], dy=jy[i, f]))
         sorter.process(FRAME, True, t=t, detections=dets)
+        for e in db.events[ev_i:]:
+            e["t"] = t
+        ev_i = len(db.events)
     return sorter, beans
 
 
 def run_s15_set(mode, seeds=20):
-    """20 seeded runs; returns per-tracker (counts, fires, g4 beans) lists."""
+    """20 seeded runs; per-tracker (counts, fires, g4 beans, blown-beans)."""
     out = {}
     for use_traj in (True, False):
-        cs, fs, g4s = [], [], []
+        cs, fs, g4s, bs = [], [], [], []
         for r in range(seeds):
             st, beans = run_s15(use_traj, 5000 + r, mode)
             cs.append(sum(st.stats.values()))
             fs.append(len(st.valve.pulses))
             g4s.append(sum(1 for b in beans if b.grade == 4))
-        out[use_traj] = (cs, fs, g4s)
+            bs.append(len(blown_g4(st, beans)))
+        out[use_traj] = (cs, fs, g4s, bs)
     return out
 
 
-# --- S15-jam: physically consistent; trajectory must be exact on all 20 runs
+# --- S15-jam: physically consistent; trajectory must be exact on all 20 runs,
+# counts AND fires (STEP 3.1: fires == expected on every seed, not just total)
 res_j = run_s15_set("jam")
-tj_c, tj_f, j_g4 = res_j[True]
-lj_c, lj_f, _ = res_j[False]
+tj_c, tj_f, j_g4, tj_b = res_j[True]
+lj_c, lj_f, _, lj_b = res_j[False]
 report("S15-jam realistic 20 seeded runs (trajectory)",
-       all(c == 32 for c in tj_c),          # spec: count error must be 0
-       f"count error 0 over 20 runs; "
-       f"fires {sum(tj_f)}/{sum(j_g4)} over 20 runs (a merged-blob frame can "
-       f"pollute a track's votes - reported, not hidden)")
-print(f"      S15-jam legacy fires {sum(lj_f)}/{sum(j_g4)}")
-print(f"      legacy counts {min(lj_c)}..{max(lj_c)}/32 fires {sum(lj_f)}")
+       all(c == 32 for c in tj_c)
+       and all(f == g for f, g in zip(tj_f, j_g4)),
+       f"counts {min(tj_c)}..{max(tj_c)}/32, "
+       f"fires {sum(tj_f)}/{sum(j_g4)} "
+       f"(per-seed min..max {min(tj_f)}..{max(tj_f)})")
+print(f"      S15-jam legacy counts {min(lj_c)}..{max(lj_c)}/32 "
+      f"fires {sum(lj_f)}/{sum(j_g4)}")
+viol = sum(1 for tb, lb in zip(tj_b, lj_b) if tb < lb)
+print(f"      S15-jam blown-beans traj={sum(tj_b)} legacy={sum(lj_b)} "
+      f"seeds traj<legacy: {viol}")
+INVARIANTS.append(("S15-jam (20 runs)", sum(lj_b), sum(tj_b), False))
 table.append(("S15-jam realistic (20 runs)", 32,
               f"{min(lj_c)}..{max(lj_c)}", f"{min(tj_c)}..{max(tj_c)}",
               sum(j_g4), sum(lj_f), sum(tj_f)))
@@ -445,28 +508,30 @@ table.append(("S15-jam realistic (20 runs)", 32,
 # one blob can hide a bean for good - an EXPECTED undercount, not a tracker
 # bug (see AGENTS.md known limitations). Numbers are printed, never hidden.
 res_o = run_s15_set("overlap")
-to_c, to_f, o_g4 = res_o[True]
-lo_c, lo_f, _ = res_o[False]
+to_c, to_f, o_g4, to_b = res_o[True]
+lo_c, lo_f, _, lo_b = res_o[False]
 ok_o = all(c == 32 for c in to_c)
 if ok_o:
     report("S15-overlap 20 seeded runs (trajectory)", True,
            f"counts {min(to_c)}..{max(to_c)}/32")
 else:
     print(f"XFAIL S15-overlap (trajectory) counts {min(to_c)}..{max(to_c)}/32 "
-          f"under={640 - sum(to_c)} of 640, fires {sum(to_f)}/{sum(o_g4)} - "
-          f"overlapping beans are one blob (known limitation)")
+          f"under={640 - sum(to_c)} of 640, fires {sum(to_f)}/{sum(o_g4)}, "
+          f"blown-beans {sum(to_b)} - overlapping beans are one blob "
+          f"(known limitation)")
 print(f"      S15-overlap legacy counts {min(lo_c)}..{max(lo_c)}/32 "
-      f"fires {sum(lo_f)}/{sum(o_g4)}")
+      f"fires {sum(lo_f)}/{sum(o_g4)} blown-beans {sum(lo_b)}")
+INVARIANTS.append(("S15-overlap (20 runs, XFAIL)", sum(lo_b), sum(to_b), True))
 table.append(("S15-overlap (20 runs, XFAIL)", 32,
               f"{min(lo_c)}..{max(lo_c)}", f"{min(to_c)}..{max(to_c)}",
               sum(o_g4), sum(lo_f), sum(to_f)))
 
-# ==================== S17 touching pairs -> one merged blob
+# ==================== S17 touching pairs -> one merged blob, 20 seeds
 # 20% of beans travel touching a neighbour; segmentation would return ONE
 # blob of ~1.9x normal area. Expected: each pair counts once -> undercount.
-# Measured and reported for both trackers; NOT fixed in this task.
-def run_s17(use_traj):
-    rng17 = np.random.default_rng(1717)
+# STEP 3.3: 20 seeds for BOTH trackers, counts and fires vs expected.
+def run_s17(use_traj, seed):
+    rng17 = np.random.default_rng(seed)
     gs = [4 if rng17.random() < 0.25 else int(rng17.integers(1, 4))
           for _ in range(30)]
     beans = std_beans(30, 500, gs)
@@ -482,13 +547,16 @@ def run_s17(use_traj):
 
     valve, db = FakeValve(), FakeDB()
     sorter = make_sorter(use_traj, valve, db, Line((0, 360), (1280, 360)))
-    t = 0.0
+    t, ev_i = 0.0, 0
     for f in range(160):
         t += 1.0 / 20
         dets = []
         merged_done = set()
         for i, b in enumerate(beans):
+            py = b.y
             b.y += b.vy / 20
+            if py < 360 <= b.y and not hasattr(b, "tc_true"):
+                b.tc_true = (t, b.x)
             if not (-80 < b.y < 780):
                 continue
             if i in pair_of and i not in merged_done:
@@ -507,20 +575,39 @@ def run_s17(use_traj):
             else:
                 dets.append(b.det())
         sorter.process(FRAME, True, t=t, detections=dets)
+        for e in db.events[ev_i:]:
+            e["t"] = t
+        ev_i = len(db.events)
     return sorter, gs, beans
 
 
-s17_t, g17, b17 = run_s17(True)
-s17_l, _, _ = run_s17(False)
-c17t, f17t = sum(s17_t.stats.values()), len(s17_t.valve.pulses)
-c17l, f17l = sum(s17_l.stats.values()), len(s17_l.valve.pulses)
-g417 = g17.count(4)
-print(f"XFAIL S17 touching pairs: undercount traj={30 - c17t} "
-      f"legacy={30 - c17l} of 30; grade-4 beans NOT blown "
-      f"traj={g417 - f17t} legacy={g417 - f17l} of {g417} "
-      f"(one merged blob -> one count; known limitation)")
-table.append(("S17 touching pairs (XFAIL)", 30, c17l, c17t,
-              g417, f17l, f17t))
+s17 = {True: [], False: []}
+s17_blown = {True: [], False: []}
+s17_g4s = []
+for seed17 in range(1717, 1737):              # 20 seeds, BOTH trackers
+    for use_traj in (True, False):
+        st, gs17, beans17 = run_s17(use_traj, seed17)
+        s17[use_traj].append((sum(st.stats.values()),
+                              len(st.valve.pulses)))
+        s17_blown[use_traj].append(len(blown_g4(st, beans17)))
+    s17_g4s.append(gs17.count(4))
+exp_c17, exp_f17 = 30 * 20, sum(s17_g4s)
+tc17 = [c for c, _ in s17[True]]
+lc17 = [c for c, _ in s17[False]]
+tf17 = sum(f for _, f in s17[True])
+lf17 = sum(f for _, f in s17[False])
+tb17, lb17 = sum(s17_blown[True]), sum(s17_blown[False])
+print(f"XFAIL S17 touching pairs (20 seeds): "
+      f"traj counts {min(tc17)}..{max(tc17)}/30 under={600 - sum(tc17)}, "
+      f"legacy counts {min(lc17)}..{max(lc17)}/30 under={600 - sum(lc17)}; "
+      f"fires traj={tf17} legacy={lf17} expected={exp_f17}; "
+      f"G4 beans blown traj={tb17} legacy={lb17} "
+      f"(merged blob -> one count; known limitation)")
+INVARIANTS.append(("S17 touching pairs (20 seeds, XFAIL)",
+                   lb17, tb17, True))
+table.append(("S17 touching pairs (20 seeds, XFAIL)", 30,
+              f"{min(lc17)}..{max(lc17)}", f"{min(tc17)}..{max(tc17)}",
+              exp_f17, lf17, tf17))
 
 # ==================== S16 stress: >40 detections in one frame
 # 60 beans, 10 lanes x 6 rows, all visible from frame 1 (>40 dets/frame).
@@ -557,6 +644,135 @@ for _ in range(200):
     pairs2 = T_mod.hungarian(cm2)
     ok_h &= len(pairs2) == 3 and len({j for _, j in pairs2}) == 3
 report("Hungarian matches brute force on 200 random matrices", ok_h)
+
+# ==================== S18 uncertain: one frame of evidence before the line
+# Fast belt (720 px/s = 90 px/frame at 8 fps): a bean appears once, then the
+# track coasts across the line on its belt prior with < TRACK_MIN_VOTES
+# votes -> "uncertain". Warm-up beans let the tracker learn belt velocity
+# first (a cold-start single-frame bean cannot cross - zero-velocity Kalman).
+# UNCERTAIN_POLICY="blow" fires it (fail-safe), "pass" lets it through.
+def run_s18(grade, policy):
+    old_p = C.UNCERTAIN_POLICY
+    C.UNCERTAIN_POLICY = policy
+    try:
+        # 8 warm beans keep >=3 confirmed tracks alive at release time so the
+        # belt velocity is learned; they stay far from the fast bean's lane.
+        beans = [Bean(80 + i * 100, -60 - i * 200, 500.0, 1, r=34)
+                 for i in range(8)]
+        fast = Bean(1100, 1e9, 720.0, grade, r=34)     # parked off-frame
+        beans.append(fast)
+        valve, db = FakeValve(), FakeDB()
+        sorter = make_sorter(True, valve, db, Line((0, 360), (1280, 360)))
+        t, ev_i, released = 0.0, 0, False
+        for f in range(64):
+            t += 1.0 / 8
+            dets = []
+            if f == 24 and not released:              # belt learned by now
+                released = True
+                fast.y = 350.0                        # 10 px above the line
+                dets.append(fast.det())               # its ONLY sighting
+            for b in beans:
+                py = b.y
+                b.y += b.vy / 8
+                if py < 360 <= b.y and not hasattr(b, "tc_true"):
+                    b.tc_true = (t, b.x)
+                if b is not fast and -80 < b.y < 780:
+                    dets.append(b.det())
+            sorter.process(FRAME, True, t=t, detections=dets)
+            for e in db.events[ev_i:]:
+                e["t"] = t
+            ev_i = len(db.events)
+        return sorter, beans
+    finally:
+        C.UNCERTAIN_POLICY = old_p
+
+
+s18b, beans18b = run_s18(4, "blow")
+unc18b = s18b.trk_counters().get("uncertain", 0)
+report("S18 G4 bean, 1 frame of evidence, policy=blow",
+       len(s18b.valve.pulses) == 1 and unc18b >= 1,
+       f"pulses={len(s18b.valve.pulses)} uncertain={unc18b}")
+s18p, _ = run_s18(4, "pass")
+report("S18 G4 bean, 1 frame of evidence, policy=pass",
+       len(s18p.valve.pulses) == 0,
+       f"pulses={len(s18p.valve.pulses)}")
+s18g, _ = run_s18(1, "blow")
+report("S18 G1 bean, 1 frame, policy=blow (accepted cost: good bean blown)",
+       len(s18g.valve.pulses) == 1,
+       f"pulses={len(s18g.valve.pulses)}")
+INVARIANTS.append(("S18 uncertain G4 policy=blow", 0,
+                   len(blown_g4(s18b, beans18b)), False))
+table.append(("S18 uncertain G4 policy=blow", 9, "-",
+              sum(s18b.stats.values()), 1, "-", len(s18b.valve.pulses)))
+
+# ==================== S19 alternating-palette defect (vote-reset safety)
+# A defect bean alternates its measured palette between a good-side and a
+# defect-side colour (dE 14, then 25 - past TRACK_REID_DE=12 from the blended
+# track mean when the mean sits defect-side). A 3-frame dropout forces a
+# gap-rebind on the good-side palette: the old rule (reset when the new palette
+# is > REID_DE from the track mean) would wipe the defect votes; the pal_hist
+# rule blocks it because the palette matches one the track already showed.
+# The bean must still blow, and the fix path must show vote_resets == 0.
+def _s19_pals(de_gap):
+    P_good = np.array([55.0, -30.0, 40.0], np.float32)   # classifies 1
+    u = (GRADE_LAB[4].astype(float) - P_good.astype(float))
+    u /= np.linalg.norm(u)
+    P_def = (P_good.astype(float) + de_gap * u).astype(np.float32)  # -> 4
+    return ([vision.PaletteColor(P_good, 1.0, "#A")],
+            [vision.PaletteColor(P_def, 1.0, "#B")])
+
+
+def run_s19(de_gap):
+    pa, pb = _s19_pals(de_gap)
+
+    def emit(b, f, t):
+        if 5 <= f <= 7:                     # 3-frame dropout mid-flight
+            return []
+        d = b.det()
+        d["palette"] = pb if 2 <= f <= 4 or f >= 11 else pa
+        return [d]
+
+    # vy=780 px/s at 20fps -> crosses y=360 during frame 11: after the gap
+    # rebind at f8 (good-side palette vs defect-side track mean -> the naive
+    # reset would fire), the tail is good-majority, so a wiped track decides
+    # grade 1 and misses. With pal_hist the defect votes survive -> blows.
+    beans = [Bean(400, -60, 780.0, 4, r=34)]
+    trj = run_scenario(True, beans, 20, 1.2, move, emit)
+    return trj, beans
+
+
+for de19 in (14.0, 25.0):
+    s19, beans19 = run_s19(de19)
+    c19 = s19.trk_counters()
+    report(f"S19 alternating palette dE={de19:.0f}: defect still blows "
+           f"(no vote wipe on rebind)",
+           len(s19.valve.pulses) == 1 and c19.get("vote_resets", 0) == 0,
+           f"pulses={len(s19.valve.pulses)} resets={c19.get('vote_resets')} "
+           f"events={s19.db.events}")
+    table.append((f"S19 alternating palette dE={de19:.0f}", 1, "-",
+                  sum(s19.stats.values()), 1, "-", len(s19.valve.pulses)))
+    INVARIANTS.append((f"S19 alternating palette dE={de19:.0f}", 0,
+                       len(blown_g4(s19, beans19)), False))
+
+# ==================== STEP 3.2 invariant: trajectory defect coverage
+# trajectory must never blow FEWER physical grade-4 beans than legacy.
+# Pulses are attributed to beans (x_on_line, event time vs true crossing);
+# legacy can fire the SAME bean twice (S11 recount, S14 split blob), so
+# distinct blown beans - not raw pulse count - is the honest comparison.
+print()
+print("Invariant: trajectory G4 beans blown >= legacy, per scenario")
+bad_inv = 0
+for name, lb, tb, xfail in INVARIANTS:
+    ok = tb >= lb
+    if not ok and xfail:
+        print(f"  XFAIL     {name}: legacy={lb} traj={tb}")
+    elif not ok:
+        bad_inv += 1
+        print(f"  VIOLATION {name}: legacy={lb} traj={tb}")
+    else:
+        print(f"  ok        {name}: legacy={lb} traj={tb}")
+report("invariant traj G4 beans blown >= legacy (all non-XFAIL rows)",
+       bad_inv == 0, f"violations={bad_inv}")
 
 # ---------------------------------------------------------------- summary
 print()
