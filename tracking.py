@@ -162,6 +162,7 @@ class TTrack:
         self.hits = 1
         self.state = "tentative"          # tentative|confirmed|coasting|lost
         self.votes = Counter()
+        self.unknown_votes = 0          # grade-4 votes cast by unrecognised dets
         self.counted = False
         self.crossing_type = None
         self.trail = deque(maxlen=int(C.TRAIL_LEN))
@@ -510,6 +511,7 @@ class TrajectoryTracker:
                     for h in tr.pal_hist)
                 if far_from_current and far_from_history:
                     tr.votes.clear()      # proven different bean -> start over
+                    tr.unknown_votes = 0
                     tr.pal, tr.pal_w = None, 0.0
                     tr.pal_hist.clear()
                     self.vote_resets += 1

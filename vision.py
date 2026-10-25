@@ -193,6 +193,21 @@ class Classifier:
             best = 4
         return best, raw
 
+    def classify_tagged(self, palette):
+        """classify() plus an `unknown` flag: True when the nearest calibrated
+        grade was still farther than UNKNOWN_DE (the colour registered on NO
+        grade). The grade returned is still 4 - unknown objects keep the
+        fail-safe fire - but callers should label the bean "?" rather than
+        printing a misleading G4."""
+        g, raw = self.classify(palette)
+        if not raw:
+            return g, raw, False
+        biased = dict(raw)
+        if 4 in biased:
+            biased[4] *= C.DEFECT_BIAS
+        pre = min(biased, key=biased.get)          # nearest before the reject
+        return g, raw, raw[pre] > C.UNKNOWN_DE
+
 
 def belt_warnings(belt_colors_lab, grade_model, tolerance, l_weight):
     """Warn when a grade's saved colours sit close to a conveyor colour -

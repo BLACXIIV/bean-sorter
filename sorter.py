@@ -48,6 +48,7 @@ class Track:
         Track._next += 1
         self.pos, self.vel, self.last_seen = pos, (0.0, 0.0), idx
         self.votes = Counter()
+        self.unknown_votes = 0          # grade-4 votes cast by unrecognised dets
         self.prev_side = None
         self.done = False
 
@@ -119,6 +120,7 @@ class Sorter:
         self.use_traj = bool(C.FEATURES.get("trajectory_tracking"))
         self.tracker = TrajectoryTracker(line) if self.use_traj else LegacyTracker()
         self.show_tracks = False
+        self.show_detected = False       # per-det instantaneous labels in run
         self.stats = Counter()
         self.blown = 0
         self.n_uncertain = 0
@@ -191,9 +193,12 @@ class Sorter:
                     tc = time.perf_counter()
                     pal = self._palette(frame, det)
                     if pal:
-                        g = self.clf.classify(pal)[0]
+                        g, _raw, unk = self.clf.classify_tagged(pal)
                         tr.votes[g] += 1
                         det["_vote"] = g
+                        det["_unknown"] = bool(unk)
+                        if unk:
+                            tr.unknown_votes += 1
                     if tim is not None:
                         tim["cls"] += (time.perf_counter() - tc) * 1000
                 matched.append((tr, det))
@@ -209,9 +214,12 @@ class Sorter:
                     tc = time.perf_counter()
                     pal = self._palette(frame, det)
                     if pal:
-                        g = self.clf.classify(pal)[0]
+                        g, _raw, unk = self.clf.classify_tagged(pal)
                         tr.votes[g] += 1
                         det["_vote"] = g
+                        det["_unknown"] = bool(unk)
+                        if unk:
+                            tr.unknown_votes += 1
                     if tim is not None:
                         tim["cls"] += (time.perf_counter() - tc) * 1000
                 grade = tr.decide()
@@ -224,6 +232,19 @@ class Sorter:
                     along = min(1.0, max(0.0, self.line.along(tr.pos)))
                     self._register(tr, grade, t, tr.pos, along, "observed", armed)
                 tr.prev_side = s
+
+        # "Show detected" in run: this frame's own classification per det
+        # (lowercase label in _draw). Dets that already voted reuse _vote;
+        # dets past MAX_VOTES get one extra palette+classify (cached palette).
+        if self.show_detected:
+            for _tr, det in matched:
+                if det.get("_vote") is not None:
+                    det["_inst"] = (det["_vote"], bool(det.get("_unknown")))
+                elif det.get("contour") is not None:
+                    pal = self._palette(frame, det)
+                    if pal:
+                        g, _raw, unk = self.clf.classify_tagged(pal)
+                        det["_inst"] = (g, bool(unk))
 
         if self._rec is not None:
             self._record(t, detections)
@@ -290,15 +311,28 @@ class Sorter:
                          + [round(float(p.weight), 4)] for p in (d.get("palette") or [])],
              "vote": d.get("_vote"), "track": d.get("_track"),
              "tstate": d.get("_tstate"), "counted": d.get("_counted"),
+             "unknown": bool(d.get("_unknown")),
              "suspect": bool(d.get("_suspect"))} for d in detections]}
         self._rec.write(json.dumps(line) + "\n")
         self._rec.flush()
 
     # ----------------------------------------------------------------- overlay
     def _draw(self, view, matched):
+        # show_detected: dim everything that isn't bean mask (same as
+        # calibrate) so detected beans pop; labels stay full brightness
+        if self.show_detected and self.belt is not None:
+            mask = self.belt.bean_mask(view)
+            view[mask == 0] = (view[mask == 0] * 0.4).astype(np.uint8)
         for tr, det in matched:
             grade = tr.decide()
-            col = vision.GRADE_BGR.get(grade, (160, 160, 160))
+            # every vote-4 came from unrecognised colours -> "?": the bean
+            # still fires (fail-safe) but the label must not claim a real
+            # defect match when nothing was registered on any grade
+            unknown_only = (grade == 4 and tr.votes.get(4, 0) > 0
+                            and getattr(tr, "unknown_votes", 0)
+                            >= tr.votes.get(4, 0))
+            col = ((160, 160, 160) if grade is None or unknown_only
+                   else vision.GRADE_BGR.get(grade, (160, 160, 160)))
             coasting = getattr(tr, "state", "") == "coasting"
             if coasting:
                 col = tuple(int(x * 0.45) for x in col)
@@ -309,12 +343,21 @@ class Sorter:
                 r = int(math.sqrt(max(1.0, det["area"]) / math.pi))
                 cv2.circle(view, (int(det["centroid"][0]), int(det["centroid"][1])),
                            r, col, 1)
-            label = "?" if grade is None else f"G{grade}"
+            label = "?" if grade is None or unknown_only else f"G{grade}"
             if self.show_tracks:
                 label += f" #{tr.id}"
             ui.put_text(view, label,
                         (int(det["centroid"][0]) - 12, int(det["centroid"][1]) + 5),
                         col, 0.6, 2)
+            inst = det.get("_inst")        # show_detected: this frame's grade
+            if inst is not None:
+                ig, iunk = inst
+                icol = ((150, 150, 150) if iunk
+                        else tuple(int(x * 0.6)
+                                   for x in vision.GRADE_BGR.get(ig, col)))
+                ui.put_text(view, "?" if iunk else f"g{ig}",
+                            (int(det["centroid"][0]) - 12,
+                             int(det["centroid"][1]) - 14), icol, 0.45, 1)
             if self.show_tracks and getattr(tr, "trail", None):
                 pts = list(tr.trail)
                 for i in range(1, len(pts)):

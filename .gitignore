@@ -8,3 +8,5 @@ __pycache__/
 
 .venv311/
 .venv*/
+
+tests/_pixel.jpg

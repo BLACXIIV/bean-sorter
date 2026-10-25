@@ -170,15 +170,21 @@ class DB:
         r = self.conn.execute("SELECT id, grade FROM samples ORDER BY id DESC LIMIT 1").fetchone()
         if not r:
             return None
+        self.conn.execute("DELETE FROM grade_colors WHERE sample_id=?", (r[0],))
         self.conn.execute("DELETE FROM samples WHERE id=?", (r[0],))
         self.conn.commit()
         return r[1]
 
     def delete_sample(self, sample_id):
+        self.conn.execute("DELETE FROM grade_colors WHERE sample_id=?",
+                          (int(sample_id),))
         self.conn.execute("DELETE FROM samples WHERE id=?", (int(sample_id),))
         self.conn.commit()
 
     def clear_grade(self, grade):
+        self.conn.execute(
+            "DELETE FROM grade_colors WHERE sample_id IN "
+            "(SELECT id FROM samples WHERE grade=?)", (grade,))
         self.conn.execute("DELETE FROM samples WHERE grade=?", (grade,))
         self.conn.commit()
 

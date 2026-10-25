@@ -163,7 +163,9 @@ python3 main.py status            # see stored hex colours per grade
   defects blown/missed, false blows on good beans and uncertain blows (`simrun` ATTR line).
 - Defects missed → lower `DEFECT_BIAS` (e.g. 0.7) or calibrate more grade 4 samples.
   Good beans blown → raise `DEFECT_BIAS` (e.g. 1.0) or add more grade 1–3 samples.
-- `UNKNOWN_DE`: anything further than this from *every* grade (stones, husks…) is treated as grade 4.
+- `UNKNOWN_DE`: anything further than this from *every* grade (stones, husks…) is treated as grade 4 —
+  it still fires the valve (fail-safe), but the camera label shows `?` instead of `G4` so unrecognised
+  colours are not mistaken for real defect matches (`Classifier.classify_tagged`).
 - Moving fast / blurry → strong light, then `EXPOSURE_US = 3000`, `ANALOGUE_GAIN = 2.0`.
 - `LENS_POSITION` = 1 / camera-to-tray distance in metres (0.2 m → 5.0).
 - Screen smaller than 1280×720 → `DISPLAY_SCALE = 0.75`.

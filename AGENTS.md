@@ -101,6 +101,8 @@ Rules:
 - Layout of operate.php: top bar 44px, camera 640x360 on the left with the control area below, grade/conveyor list on the right.
 - Reuse components: .btn, .btn-primary, .btn-secondary, .btn-danger, .btn-grade[data-grade], .chip, .toast, .banner(.warn/.error), .modal, .accordion, .table, .swatch. Add new components to app.css with the .c- prefix. No inline styles, no new colours, no CDN, no external fonts or icons (inline SVG only).
 - Feedback: success toast 3 s auto-dismiss; errors show the code text from the API; banners for persistent conditions only (engine down needs 3 failed polls and clears itself).
+- Detection labels: `G1`-`G4` only for a colour that actually matches a calibrated grade. A bean farther than `UNKNOWN_DE` from EVERY grade draws `?` in grey (Classifier.classify_tagged) - it still votes/fires as grade 4 (fail-safe), but the label must never claim a real match. `?engine=host:port` on operate.php overrides the engine base (tests/dev).
+- Overlay toggles default ON: `show_tracks` (trail + `#id` on track labels) and `show_detected`. In run mode `show_detected` dims all non-bean-mask pixels x0.4 (same as calibrate, on the annotated view copy only - never before analysis) and adds a SMALL lowercase label (`g1`-`g4` / `?`, dimmed) above each det's track label = this frame's own classification vs the track's decided grade; dets past MAX_VOTES get one extra cached-palette classify. Toggled from calibrate AND run panels via POST /api/calibrate/show-detected (same engine flag).
 - Destructive actions (clear grade, delete, shutdown) always use a confirm modal.
 - Any new screen needs a 1024x600 screenshot in the report.
 

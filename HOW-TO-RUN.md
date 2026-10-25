@@ -143,7 +143,7 @@ in `config.py` or Admin → Settings.
 | Wrong grades | recalibrate under the *same* light; Admin → Settings `DEFECT_BIAS` |
 | Logs | `logs/engine.log`, `logs/php.log` (stack traces, never silent) |
 
----
+----------------------------------------------------------------------------------
 
 ## Part 2 — Windows laptop (dev / testing, simulated valve)
 

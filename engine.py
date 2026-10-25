@@ -77,8 +77,8 @@ class Engine:
         self.mode = "idle"          # idle | calibrate | run
         self.armed = False
         self.selected_target = 1    # "belt" | 1 | 2 | 3 | 4
-        self.show_detected = False
-        self.show_tracks = False
+        self.show_detected = True
+        self.show_tracks = True
         self.message = "Engine started"
         self.session_id = None
         self.sorter = None
@@ -175,19 +175,24 @@ class Engine:
                         mask = self.belt.bean_mask(frame)
                         frame[mask == 0] = \
                             (frame[mask == 0] * 0.4).astype(np.uint8)
-                    # every blob gets a predicted-grade tint + label
+                    # every blob gets a predicted-grade tint + label; a blob
+                    # farther than UNKNOWN_DE from every grade shows "?"
+                    # (it still fires as grade 4 at the line - fail-safe)
                     for b in beans:
-                        grade = None
+                        grade = unknown = None
                         if self.clf.model:
                             pal = vision.extract_palette(
                                 vision.bean_pixels(frame, b.contour,
                                                    self.belt))
                             if pal:
-                                grade = self.clf.classify(pal)[0]
-                        col = vision.GRADE_BGR.get(grade, (160, 160, 160))
+                                grade, _r, unknown = \
+                                    self.clf.classify_tagged(pal)
+                        col = ((160, 160, 160) if grade is None or unknown
+                               else vision.GRADE_BGR.get(grade, (160, 160, 160)))
                         cv2.drawContours(frame, [b.contour], -1, col, 2)
                         ui.put_text(
-                            frame, "?" if grade is None else f"G{grade}",
+                            frame, "?" if grade is None or unknown
+                                  else f"G{grade}",
                             (int(b.centroid[0]) - 12, int(b.centroid[1]) + 5),
                             col, 0.6, 2)
                 label = ("BELT" if self.selected_target == "belt"
@@ -256,6 +261,7 @@ class Engine:
                 self.sorter = Sorter(self.db, self.bg, self.clf, self.line,
                                      self.valve, self.session_id, belt=self.belt)
                 self.sorter.show_tracks = self.show_tracks
+                self.sorter.show_detected = self.show_detected
                 self.armed = True
                 if self.sim:
                     self.cam.set_scene("moving")
@@ -565,6 +571,8 @@ def api_clear():
 @app.route("/api/calibrate/show-detected", methods=["POST", "OPTIONS"])
 def api_show():
     E.show_detected = bool(body().get("on"))
+    if E.sorter is not None:
+        E.sorter.show_detected = E.show_detected
     return ok(on=E.show_detected)
 
 

@@ -2,7 +2,8 @@
 (function () {
   'use strict';
   window.__op = 1;                        // tells admin.js not to double-poll the chip
-  var ENGINE = 'http://' + location.hostname + ':5000';
+  var _eq = new URLSearchParams(location.search).get('engine');  // ?engine=host:port override (tests/dev)
+  var ENGINE = _eq ? 'http://' + _eq : 'http://' + location.hostname + ':5000';
   var $ = function (id) { return document.getElementById(id); };
 
   var st = null;              // last /api/status
@@ -219,6 +220,9 @@
   $('show-detected').onchange = function () {
     post('/api/calibrate/show-detected', { on: $('show-detected').checked });
   };
+  $('run-detected').onchange = function () {
+    post('/api/calibrate/show-detected', { on: $('run-detected').checked });
+  };
 
   /* ---------------- camera click ---------------- */
   $('cam').addEventListener('pointerdown', function (ev) {
@@ -351,6 +355,7 @@
         $('btn-tracks').textContent = j.show_tracks ? 'Tracks: ON' : 'Tracks';
         $('btn-arm').textContent = j.armed ? 'DISARM' : 'ARM';
         $('show-detected').checked = !!j.show_detected;
+        $('run-detected').checked = !!j.show_detected;
         updateStart();
       })
       .catch(function (e) {

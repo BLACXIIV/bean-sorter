@@ -48,6 +48,8 @@ page_head('Operate', 'operate', false);
           <button id="btn-arm">ARM</button>
           <button id="btn-valve">Test valve</button>
           <button id="btn-tracks">Tracks</button>
+          <label class="toggle" style="margin-left:auto">
+            <input type="checkbox" id="run-detected">Show detected</label>
         </div>
         <div class="btnrow">
           <input type="text" id="batch" placeholder="Batch name (optional)" style="flex:1">

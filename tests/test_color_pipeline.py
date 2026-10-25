@@ -104,5 +104,21 @@ warn2 = vision.belt_warnings(belt_lab, {2: far.reshape(1, 3)},
                              C.BELT_TOLERANCE, C.BELT_L_WEIGHT)
 report("belt_warnings quiet for distant grade colour", len(warn2) == 0)
 
+# classify_tagged: a colour far from EVERY grade is flagged "unknown" (still
+# graded 4 - fail-safe firing), while a matching colour is not flagged.
+pc = lambda lab, w=1.0: vision.PaletteColor(np.array(lab, np.float32), w, "")
+model2 = {g: ref_lab(bgr).reshape(1, 3) for g, bgr in BEANS.items()}
+clf2 = vision.Classifier(model2)
+alien = ref_lab((255, 0, 255))                       # magenta - no such bean
+g_alien, _, unk_alien = clf2.classify_tagged([pc(alien)])
+report("classify_tagged flags unrecognised colour",
+       g_alien == 4 and unk_alien,
+       f"g={g_alien} unknown={unk_alien}")
+near1 = ref_lab(BEANS[1]) + np.array([0.0, 1.0, 0.0])
+g_near, _, unk_near = clf2.classify_tagged([pc(near1)])
+report("classify_tagged clear for a registered colour",
+       g_near == 1 and not unk_near,
+       f"g={g_near} unknown={unk_near}")
+
 print(f"{sum(results)}/{len(results)} checks passed")
 sys.exit(0 if all(results) else 1)

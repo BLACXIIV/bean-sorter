@@ -109,13 +109,12 @@ def main():
         print("0/0 checks ran (all skipped)")
         return 0
 
-    # write a 1x1 jpeg for the stub stream
-    import base64
-    Path(ROOT / "tests" / "_pixel.jpg").write_bytes(base64.b64decode(
-        "/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQE"
-        "BAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8QEBEQCgwSExIQEw8QEBD"
-        "/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAAAAAAA"
-        "AAAAAAAAAAAAAP/aAAwDAQACEAMQAAAA9A//2Q=="))
+    # write a 1x1 jpeg for the stub stream (generated - the baked base64
+    # literal was missing characters and failed to decode)
+    import cv2
+    import numpy as np
+    Path(ROOT / "tests" / "_pixel.jpg").write_bytes(
+        cv2.imencode(".jpg", np.zeros((1, 1, 3), np.uint8))[1].tobytes())
 
     eng_port, web_port = free_port(), free_port()
     stub = ThreadingHTTPServer(("127.0.0.1", eng_port), Stub)
